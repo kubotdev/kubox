@@ -1,0 +1,128 @@
+package slice
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestLoadAndValidate(t *testing.T) {
+	dir := t.TempDir()
+	yaml := `
+name: payment
+app:
+  image: myregistry/payment:latest
+  port: 8080
+  env:
+    INVENTORY_URL: http://inventory:8080
+dependencies:
+  - name: inventory
+    image: myregistry/inventory:latest
+    port: 8080
+  - name: postgres
+    image: postgres:16-alpine
+    port: 5432
+    env:
+      POSTGRES_PASSWORD: kubox
+quotas:
+  cpu: "2"
+  memory: 4Gi
+  pods: "20"
+`
+	if err := os.WriteFile(filepath.Join(dir, "kubox.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, gotDir, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if gotDir != dir {
+		t.Errorf("dir = %q, want %q", gotDir, dir)
+	}
+	if s.Name != "payment" {
+		t.Errorf("Name = %q, want payment", s.Name)
+	}
+	if s.App.Port != 8080 {
+		t.Errorf("App.Port = %d, want 8080", s.App.Port)
+	}
+	if len(s.Dependencies) != 2 {
+		t.Errorf("Dependencies = %d, want 2", len(s.Dependencies))
+	}
+	if s.Dependencies[1].Image != "postgres:16-alpine" {
+		t.Errorf("Dependencies[1].Image = %q", s.Dependencies[1].Image)
+	}
+	if s.Dependencies[1].Env["POSTGRES_PASSWORD"] != "kubox" {
+		t.Errorf("Dependencies[1].Env POSTGRES_PASSWORD = %q", s.Dependencies[1].Env["POSTGRES_PASSWORD"])
+	}
+	if *s.App.Replicas != 1 {
+		t.Errorf("App.Replicas = %d, want 1 (default)", *s.App.Replicas)
+	}
+	if s.Quotas.CPU != "2" {
+		t.Errorf("Quotas.CPU = %q", s.Quotas.CPU)
+	}
+	if s.NetworkPolicy.Default != "deny-all" {
+		t.Errorf("NetworkPolicy.Default = %q", s.NetworkPolicy.Default)
+	}
+	if s.Toolbox.Image != DefaultToolboxImage {
+		t.Errorf("Toolbox.Image = %q", s.Toolbox.Image)
+	}
+}
+
+func TestValidateRejectsMissingImage(t *testing.T) {
+	s := &Slice{Name: "x"}
+	if err := s.Validate(); err == nil {
+		t.Error("expected error for missing app.image")
+	}
+}
+
+func TestValidateRejectsDependencyWithoutImage(t *testing.T) {
+	s := &Slice{
+		Name: "x",
+		App:  App{Image: "img"},
+		Dependencies: []Dependency{
+			{Name: "db"},
+		},
+	}
+	if err := s.Validate(); err == nil {
+		t.Error("expected error for dependency without image")
+	}
+}
+
+func TestEnvNamespace(t *testing.T) {
+	if got := EnvNamespace("fix-auth"); got != "kubox-fix-auth" {
+		t.Errorf("EnvNamespace = %q", got)
+	}
+}
+
+func TestParseTTL(t *testing.T) {
+	tests := []struct {
+		in      string
+		want    time.Duration
+		wantErr bool
+	}{
+		{"", DefaultTTL, false},
+		{"30m", 30 * time.Minute, false},
+		{"1h", time.Hour, false},
+		{"6h", 6 * time.Hour, false},
+		{"24h", 24 * time.Hour, false},
+		{"-1h", 0, true},
+		{"bogus", 0, true},
+	}
+	for _, tt := range tests {
+		got, err := ParseTTL(tt.in)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("ParseTTL(%q): expected error", tt.in)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("ParseTTL(%q): %v", tt.in, err)
+			continue
+		}
+		if got != tt.want {
+			t.Errorf("ParseTTL(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
