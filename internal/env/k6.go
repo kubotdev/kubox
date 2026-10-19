@@ -3,7 +3,9 @@ package env
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -90,22 +92,9 @@ func (m *Manager) RunLoadTest(ctx context.Context, envName, scriptPath string) (
 		return nil, fmt.Errorf("app service %q has no ports", envName)
 	}
 
-	script, err := os.ReadFile(scriptPath)
+	cmName, mounts, err := m.buildScriptConfigMap(ctx, ns, envName, scriptPath)
 	if err != nil {
-		return nil, fmt.Errorf("read k6 script: %w", err)
-	}
-
-	cmName := fmt.Sprintf("k6-script-%d", time.Now().UnixNano()%1e9)
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      cmName,
-			Namespace: ns,
-			Labels:    commonLabels(envName, "k6-script"),
-		},
-		Data: map[string]string{"load.js": string(script)},
-	}
-	if _, err := m.Client.CoreV1().ConfigMaps(ns).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
-		return nil, fmt.Errorf("create k6 script configmap: %w", err)
+		return nil, err
 	}
 	defer func() {
 		_ = m.Client.CoreV1().ConfigMaps(ns).Delete(context.WithoutCancel(ctx), cmName, metav1.DeleteOptions{})
@@ -113,24 +102,159 @@ func (m *Manager) RunLoadTest(ctx context.Context, envName, scriptPath string) (
 
 	endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", envName, ns, svc.Spec.Ports[0].Port)
 
+	entry := filepath.Base(scriptPath)
 	command := []string{
 		"sh", "-c",
-		"k6 run --summary-export=/tmp/results.json /scripts/load.js; EXIT=$?; " +
-			"echo ===KUBOX_JSON===; cat /tmp/results.json 2>/dev/null; " +
-			"echo; echo ===KUBOX_JSON_END===; exit $EXIT",
+		fmt.Sprintf("k6 run --summary-export=/tmp/results.json %s; EXIT=$?; "+
+			"echo %s; cat /tmp/results.json 2>/dev/null; "+
+			"echo; echo %s; exit $EXIT",
+			shellQuote("/scripts/"+entry), k6JSONMarker, k6JSONEndMarker),
 	}
-
-	mounts := []Mount{{
-		Name:          "scripts",
-		MountPath:     "/scripts",
-		ConfigMapName: cmName,
-	}}
 
 	result, err := m.runK6Pod(ctx, envName, ns, command, mounts, endpoint)
 	if err != nil {
 		return nil, err
 	}
 	return parseK6Result(result)
+}
+
+const (
+	k6ScriptMaxFiles = 200
+	k6ScriptMaxBytes = 950 * 1024
+	k6ScriptMaxDepth = 3
+)
+
+var k6ScriptExts = map[string]bool{
+	".js": true, ".mjs": true, ".cjs": true, ".json": true,
+	".csv": true, ".txt": true, ".html": true, ".htm": true,
+}
+
+func (m *Manager) buildScriptConfigMap(ctx context.Context, ns, envName, scriptPath string) (string, []Mount, error) {
+	dir := filepath.Dir(scriptPath)
+	entryClean := filepath.Clean(scriptPath)
+	cmName := fmt.Sprintf("k6-script-%d", time.Now().UnixNano()%1e9)
+
+	data := map[string]string{}
+	var items []corev1.KeyToPath
+	usedKeys := map[string]bool{}
+	total := 0
+	otherFiles := 0
+	entrySeen := false
+
+	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		isEntry := filepath.Clean(path) == entryClean
+		if strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return fs.SkipDir
+			}
+			if !isEntry {
+				return nil
+			}
+		}
+		if d.IsDir() {
+			if strings.Count(rel, string(filepath.Separator))+1 >= k6ScriptMaxDepth {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if !isEntry {
+			if !k6ScriptExts[strings.ToLower(filepath.Ext(path))] {
+				return nil
+			}
+			if otherFiles >= k6ScriptMaxFiles {
+				return nil
+			}
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		total += len(b)
+		if total > k6ScriptMaxBytes {
+			return fmt.Errorf("test scripts in %s exceed %dKB limit (ConfigMap bound)", dir, k6ScriptMaxBytes/1024)
+		}
+		mountRel := filepath.ToSlash(rel)
+		key := dedupeScriptKey(usedKeys, scriptCMKey(mountRel))
+		data[key] = string(b)
+		items = append(items, corev1.KeyToPath{Key: key, Path: mountRel})
+		if isEntry {
+			entrySeen = true
+		} else {
+			otherFiles++
+		}
+		return nil
+	})
+	if walkErr != nil {
+		if errors.Is(walkErr, fs.ErrNotExist) {
+			return "", nil, fmt.Errorf("k6 script not found: %s", scriptPath)
+		}
+		return "", nil, fmt.Errorf("collect test scripts from %s: %w", dir, walkErr)
+	}
+	if !entrySeen {
+		return "", nil, fmt.Errorf("k6 script not found: %s", scriptPath)
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      cmName,
+			Namespace: ns,
+			Labels:    commonLabels(envName, "k6-script"),
+		},
+		Data: data,
+	}
+	if _, err := m.Client.CoreV1().ConfigMaps(ns).Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+		return "", nil, fmt.Errorf("create k6 script configmap: %w", err)
+	}
+	return cmName, []Mount{{
+		Name:          "scripts",
+		MountPath:     "/scripts",
+		ConfigMapName: cmName,
+		Items:         items,
+	}}, nil
+}
+
+func scriptCMKey(rel string) string {
+	var b strings.Builder
+	for _, r := range rel {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
+}
+
+func dedupeScriptKey(used map[string]bool, base string) string {
+	if !used[base] {
+		used[base] = true
+		return base
+	}
+	for i := 2; ; i++ {
+		k := fmt.Sprintf("%s-%d", base, i)
+		if !used[k] {
+			used[k] = true
+			return k
+		}
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func (m *Manager) runK6Pod(ctx context.Context, envName, ns string, command []string, mounts []Mount, baseURL string) (*ExecResult, error) {
@@ -146,6 +270,7 @@ func (m *Manager) runK6Pod(ctx context.Context, envName, ns string, command []st
 				VolumeSource: corev1.VolumeSource{
 					ConfigMap: &corev1.ConfigMapVolumeSource{
 						LocalObjectReference: corev1.LocalObjectReference{Name: mt.ConfigMapName},
+						Items:                mt.Items,
 					},
 				},
 			})
@@ -203,8 +328,7 @@ func (m *Manager) runK6Pod(ctx context.Context, envName, ns string, command []st
 		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
 			return m.collectPodResult(ctx, ns, name, "k6", p)
 		}
-		// Fail fast on unrecoverable container errors (bad image tag,
-		// registry unreachable) instead of waiting out the full deadline.
+
 		if reason, msg := podStartupFailure(p); reason != "" {
 			return nil, fmt.Errorf("k6 pod failed to start: %s: %s", reason, msg)
 		}

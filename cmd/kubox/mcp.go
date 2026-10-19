@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/kubotdev/kubox/internal/env"
 	"github.com/kubotdev/kubox/internal/mcp"
 	"github.com/kubotdev/kubox/internal/slice"
 )
@@ -264,7 +265,8 @@ func testLoadTool(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	result, err := m.RunLoadTest(ctx, args.Name, args.Script)
+	resolved := env.ResolveScriptPath("", args.Script)
+	result, err := m.RunLoadTest(ctx, args.Name, resolved)
 	if err != nil {
 		return "", err
 	}

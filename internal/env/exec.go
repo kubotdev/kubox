@@ -115,6 +115,7 @@ type Mount struct {
 	Name          string
 	MountPath     string
 	ConfigMapName string
+	Items         []corev1.KeyToPath
 }
 
 func (m *Manager) collectPodResult(ctx context.Context, ns, name, container string, pod *corev1.Pod) (*ExecResult, error) {
