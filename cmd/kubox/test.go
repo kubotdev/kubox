@@ -1,14 +1,24 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/kubotdev/kubox/internal/env"
 	"github.com/kubotdev/kubox/internal/slice"
 )
+
+func loadTestContext(cmd *cobra.Command) (context.Context, context.CancelFunc) {
+	if cmd.Root().PersistentFlags().Changed("timeout") {
+		return contextWithTimeout(cmd)
+	}
+	return context.WithTimeout(cmd.Context(), 15*time.Minute)
+}
 
 func newTestCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -73,7 +83,7 @@ func newTestLoadCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, cancel := contextWithTimeout(cmd)
+			ctx, cancel := loadTestContext(cmd)
 			defer cancel()
 
 			// Optionally create the environment first.
@@ -145,7 +155,13 @@ func printK6Human(cmd *cobra.Command, r *env.K6Result) {
 	fmt.Fprintf(out, "  p99:       %.1fms\n", r.Summary.P99)
 	if len(r.Thresholds) > 0 {
 		fmt.Fprintf(out, "  thresholds:\n")
-		for name, t := range r.Thresholds {
+		keys := make([]string, 0, len(r.Thresholds))
+		for name := range r.Thresholds {
+			keys = append(keys, name)
+		}
+		sort.Strings(keys)
+		for _, name := range keys {
+			t := r.Thresholds[name]
 			mark := "✓"
 			if !t.Pass {
 				mark = "✗"

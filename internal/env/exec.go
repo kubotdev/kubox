@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -66,6 +67,12 @@ func (m *Manager) ExecOnce(ctx context.Context, envName, image string, command [
 				Image:        image,
 				Command:      command,
 				VolumeMounts: volMounts,
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("50m"),
+						corev1.ResourceMemory: resource.MustParse("64Mi"),
+					},
+				},
 			}},
 			Volumes: volumes,
 		},
@@ -91,7 +98,10 @@ func (m *Manager) ExecOnce(ctx context.Context, envName, image string, command [
 		}
 		switch p.Status.Phase {
 		case corev1.PodSucceeded, corev1.PodFailed:
-			return m.collectPodResult(ctx, ns, name, p)
+			return m.collectPodResult(ctx, ns, name, "run", p)
+		}
+		if reason, msg := podStartupFailure(p); reason != "" {
+			return nil, fmt.Errorf("runner pod failed to start: %s: %s", reason, msg)
 		}
 		select {
 		case <-ctx.Done():
@@ -107,7 +117,7 @@ type Mount struct {
 	ConfigMapName string
 }
 
-func (m *Manager) collectPodResult(ctx context.Context, ns, name string, pod *corev1.Pod) (*ExecResult, error) {
+func (m *Manager) collectPodResult(ctx context.Context, ns, name, container string, pod *corev1.Pod) (*ExecResult, error) {
 	res := &ExecResult{}
 	if pod.Status.Phase == corev1.PodFailed {
 		for _, cs := range pod.Status.ContainerStatuses {
@@ -126,7 +136,7 @@ func (m *Manager) collectPodResult(ctx context.Context, ns, name string, pod *co
 		res.Stdout = string(logs)
 	}
 
-	if out, err := m.execInPod(ctx, ns, name, "run", []string{"cat", "/tmp/results.json"}); err == nil && out.Stdout != "" {
+	if out, err := m.execInPod(ctx, ns, name, container, []string{"cat", "/tmp/results.json"}); err == nil && out.Stdout != "" {
 		res.Stdout = out.Stdout
 	}
 	return res, nil
@@ -166,6 +176,12 @@ func (m *Manager) ensureToolbox(ctx context.Context, envName, ns string) error {
 				Name:    toolboxName,
 				Image:   m.toolboxImage,
 				Command: []string{"sh", "-c", "while true; do sleep 3600; done"},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("50m"),
+						corev1.ResourceMemory: resource.MustParse("64Mi"),
+					},
+				},
 			}},
 		},
 	}

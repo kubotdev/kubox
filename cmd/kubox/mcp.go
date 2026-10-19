@@ -165,7 +165,9 @@ func upTool(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	s.Name = args.Name
+	if args.Name != "" {
+		s.Name = args.Name
+	}
 	ttlDur, err := slice.ParseTTL(args.TTL)
 	if err != nil {
 		return "", err

@@ -1,0 +1,9 @@
+name: whoami
+app:
+  image: traefik/whoami:v1.10.3
+  port: 80
+dependencies: []
+quotas:
+  cpu: "500m"
+  memory: 256Mi
+  pods: "5"

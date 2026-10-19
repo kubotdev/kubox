@@ -10,12 +10,13 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/kubotdev/kubox/internal/slice"
 )
 
-const K6Image = "grafana/k6:0.54"
+const K6Image = "grafana/k6:0.54.0"
 
 type K6Result struct {
 	Status     string             `json:"status"` // "pass" or "fail"
@@ -38,12 +39,37 @@ type K6Summary struct {
 }
 
 type k6Metric struct {
-	Values     map[string]float64  `json:"values"`
-	Thresholds map[string]k6Thresh `json:"thresholds"`
+	Thresholds map[string]json.RawMessage `json:"thresholds"`
+	Values     map[string]float64         `json:"-"`
 }
 
-type k6Thresh struct {
-	OK bool `json:"ok"`
+func (m *k6Metric) UnmarshalJSON(data []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	m.Values = map[string]float64{}
+	for k, v := range raw {
+		switch k {
+		case "thresholds":
+			if err := json.Unmarshal(v, &m.Thresholds); err != nil {
+				return err
+			}
+		case "values":
+			var nested map[string]float64
+			if err := json.Unmarshal(v, &nested); err == nil {
+				for nk, nv := range nested {
+					m.Values[nk] = nv
+				}
+			}
+		default:
+			var f float64
+			if err := json.Unmarshal(v, &f); err == nil {
+				m.Values[k] = f
+			}
+		}
+	}
+	return nil
 }
 
 type k6SummaryExport struct {
@@ -55,6 +81,13 @@ func (m *Manager) RunLoadTest(ctx context.Context, envName, scriptPath string) (
 
 	if _, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{}); err != nil {
 		return nil, fmt.Errorf("environment %q not found — run `kubox up` first", envName)
+	}
+	svc, err := m.Client.CoreV1().Services(ns).Get(ctx, envName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("app service %q not found in environment %q: %w", envName, envName, err)
+	}
+	if len(svc.Spec.Ports) == 0 {
+		return nil, fmt.Errorf("app service %q has no ports", envName)
 	}
 
 	script, err := os.ReadFile(scriptPath)
@@ -78,11 +111,13 @@ func (m *Manager) RunLoadTest(ctx context.Context, envName, scriptPath string) (
 		_ = m.Client.CoreV1().ConfigMaps(ns).Delete(context.WithoutCancel(ctx), cmName, metav1.DeleteOptions{})
 	}()
 
-	endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", envName, ns, appPortForEnv(envName))
+	endpoint := fmt.Sprintf("http://%s.%s.svc.cluster.local:%d", envName, ns, svc.Spec.Ports[0].Port)
 
 	command := []string{
 		"sh", "-c",
-		"k6 run --summary-export=/tmp/results.json /scripts/load.js; EXIT=$?; cat /tmp/results.json 2>/dev/null; exit $EXIT",
+		"k6 run --summary-export=/tmp/results.json /scripts/load.js; EXIT=$?; " +
+			"echo ===KUBOX_JSON===; cat /tmp/results.json 2>/dev/null; " +
+			"echo; echo ===KUBOX_JSON_END===; exit $EXIT",
 	}
 
 	mounts := []Mount{{
@@ -131,10 +166,16 @@ func (m *Manager) runK6Pod(ctx context.Context, envName, ns string, command []st
 				Image:        K6Image,
 				Command:      command,
 				VolumeMounts: volMounts,
-				Env: []corev1.EnvVar{{
-					Name:  "BASE_URL",
-					Value: baseURL,
-				}},
+				Env: []corev1.EnvVar{
+					{Name: "BASE_URL", Value: baseURL},
+					{Name: "K6_SUMMARY_TREND_STATS", Value: "avg,min,med,max,p(90),p(95),p(99)"},
+				},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("100m"),
+						corev1.ResourceMemory: resource.MustParse("64Mi"),
+					},
+				},
 			}},
 			Volumes: volumes,
 		},
@@ -160,7 +201,12 @@ func (m *Manager) runK6Pod(ctx context.Context, envName, ns string, command []st
 			return nil, err
 		}
 		if p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed {
-			return m.collectPodResult(ctx, ns, name, p)
+			return m.collectPodResult(ctx, ns, name, "k6", p)
+		}
+		// Fail fast on unrecoverable container errors (bad image tag,
+		// registry unreachable) instead of waiting out the full deadline.
+		if reason, msg := podStartupFailure(p); reason != "" {
+			return nil, fmt.Errorf("k6 pod failed to start: %s: %s", reason, msg)
 		}
 		select {
 		case <-ctx.Done():
@@ -170,7 +216,22 @@ func (m *Manager) runK6Pod(ctx context.Context, envName, ns string, command []st
 	}
 }
 
-func appPortForEnv(_ string) int { return 8080 }
+func podStartupFailure(p *corev1.Pod) (reason, msg string) {
+	for _, cs := range p.Status.ContainerStatuses {
+		if w := cs.State.Waiting; w != nil {
+			switch w.Reason {
+			case "ErrImagePull", "ImagePullBackOff", "InvalidImageName", "CreateContainerConfigError":
+				return w.Reason, w.Message
+			}
+		}
+	}
+	return "", ""
+}
+
+const (
+	k6JSONMarker    = "===KUBOX_JSON==="
+	k6JSONEndMarker = "===KUBOX_JSON_END==="
+)
 
 func parseK6Result(res *ExecResult) (*K6Result, error) {
 	out := &K6Result{
@@ -181,30 +242,80 @@ func parseK6Result(res *ExecResult) (*K6Result, error) {
 		out.Status = "pass"
 	}
 
-	jsonStart := strings.Index(res.Stdout, "{")
-	jsonEnd := strings.LastIndex(res.Stdout, "}")
-	if jsonStart >= 0 && jsonEnd > jsonStart {
-		var raw k6SummaryExport
-		if err := json.Unmarshal([]byte(res.Stdout[jsonStart:jsonEnd+1]), &raw); err == nil {
-			out.Thresholds = extractThresholds(raw.Metrics)
-			out.Summary = extractSummary(raw.Metrics)
+	if raw := extractK6JSON(res.Stdout); raw != "" {
+		var export k6SummaryExport
+		if err := json.Unmarshal([]byte(raw), &export); err == nil {
+			out.Thresholds = extractThresholds(export.Metrics)
+			out.Summary = extractSummary(export.Metrics)
 		}
 	}
 	return out, nil
 }
 
+func extractK6JSON(stdout string) string {
+	trimmed := strings.TrimSpace(stdout)
+	if i := strings.Index(trimmed, k6JSONMarker); i >= 0 {
+		rest := trimmed[i+len(k6JSONMarker):]
+		if j := strings.Index(rest, k6JSONEndMarker); j >= 0 {
+			rest = rest[:j]
+		}
+		if s := strings.TrimSpace(rest); s != "" {
+			return s
+		}
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		return trimmed
+	}
+	if i := strings.Index(trimmed, "{"); i >= 0 {
+		if j := strings.LastIndex(trimmed, "}"); j > i {
+			return trimmed[i : j+1]
+		}
+	}
+	return ""
+}
+
+func decodeThresh(raw json.RawMessage) (crossed, ok bool) {
+	var b bool
+	if err := json.Unmarshal(raw, &b); err == nil {
+		return b, true
+	}
+	var obj struct {
+		OK *bool `json:"ok"`
+	}
+	if err := json.Unmarshal(raw, &obj); err == nil && obj.OK != nil {
+		return *obj.OK, true
+	}
+	return false, false
+}
+
 func extractThresholds(metrics map[string]k6Metric) map[string]K6Check {
 	out := map[string]K6Check{}
 	for name, m := range metrics {
-		for cond, t := range m.Thresholds {
+		for cond, raw := range m.Thresholds {
+			crossed, ok := decodeThresh(raw)
+			if !ok {
+				continue
+			}
 			key := fmt.Sprintf("%s_%s", name, sanitizeThresholdKey(cond))
 			out[key] = K6Check{
-				Value: m.Values["value"],
-				Pass:  t.OK,
+				Value: thresholdValue(m.Values, cond),
+				Pass:  !crossed,
 			}
 		}
 	}
 	return out
+}
+
+func thresholdValue(values map[string]float64, cond string) float64 {
+	stat := cond
+	if i := strings.IndexAny(cond, "<>"); i >= 0 {
+		stat = strings.TrimSpace(cond[:i])
+	}
+	if v, ok := values[stat]; ok {
+		return v
+	}
+	return values["value"]
 }
 
 func sanitizeThresholdKey(s string) string {

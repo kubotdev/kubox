@@ -56,6 +56,8 @@ quotas:
   pods: "20"
 ```
 
+Quotas are namespace-wide, so size them to cover the app, its dependencies, *and* kubox's own pods: the toolbox (50m/64Mi) and the k6 test runner (100m/64Mi). If `cpu`/`memory` headroom is too tight, pod creation fails with `failed quota`.
+
 ### 2. Create an environment
 
 ```sh

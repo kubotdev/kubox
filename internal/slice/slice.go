@@ -20,11 +20,19 @@ type Slice struct {
 }
 
 type App struct {
-	Image    string            `yaml:"image"`
-	Replicas *int              `yaml:"replicas"`
-	Port     int               `yaml:"port"`
-	Env      map[string]string `yaml:"env"`
-	Build    *Build            `yaml:"build"`
+	Image     string            `yaml:"image"`
+	Replicas  *int              `yaml:"replicas"`
+	Port      int               `yaml:"port"`
+	Env       map[string]string `yaml:"env"`
+	Build     *Build            `yaml:"build"`
+	Resources Resources         `yaml:"resources"`
+}
+
+type Resources struct {
+	RequestsCPU    string `yaml:"requestsCPU"`
+	RequestsMemory string `yaml:"requestsMemory"`
+	LimitsCPU      string `yaml:"limitsCPU"`
+	LimitsMemory   string `yaml:"limitsMemory"`
 }
 
 type Build struct {
@@ -32,10 +40,11 @@ type Build struct {
 }
 
 type Dependency struct {
-	Name  string            `yaml:"name"`
-	Image string            `yaml:"image"`
-	Port  int               `yaml:"port"`
-	Env   map[string]string `yaml:"env"`
+	Name      string            `yaml:"name"`
+	Image     string            `yaml:"image"`
+	Port      int               `yaml:"port"`
+	Env       map[string]string `yaml:"env"`
+	Resources Resources         `yaml:"resources"`
 }
 
 type Quotas struct {
@@ -107,6 +116,10 @@ func (s *Slice) Validate() error {
 	if s.Toolbox.Image == "" {
 		s.Toolbox.Image = DefaultToolboxImage
 	}
+	s.App.Resources = s.App.Resources.withDefaults()
+	for i := range s.Dependencies {
+		s.Dependencies[i].Resources = s.Dependencies[i].Resources.withDefaults()
+	}
 	for i, d := range s.Dependencies {
 		if d.Name == "" {
 			return fmt.Errorf("kubox.yaml: dependencies[%d].name is required", i)
@@ -123,6 +136,23 @@ func (s *Slice) AppServiceName() string { return s.Name }
 func (s *Slice) AppEndpoint() string {
 	return fmt.Sprintf("%s.%s.svc.cluster.local:%d", s.AppServiceName(), EnvNamespace(s.Name), s.App.Port)
 }
+
+const (
+	DefaultRequestsCPU    = "50m"
+	DefaultRequestsMemory = "64Mi"
+)
+
+func (r Resources) withDefaults() Resources {
+	if r.RequestsCPU == "" {
+		r.RequestsCPU = DefaultRequestsCPU
+	}
+	if r.RequestsMemory == "" {
+		r.RequestsMemory = DefaultRequestsMemory
+	}
+	return r
+}
+
+func (r Resources) IsZero() bool { return r.LimitsCPU == "" && r.LimitsMemory == "" }
 
 func EnvNamespace(envName string) string {
 	return "kubox-" + envName

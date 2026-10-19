@@ -56,8 +56,13 @@ func (m *Manager) Create(ctx context.Context, s *slice.Slice, ttl time.Duration)
 	ns := slice.EnvNamespace(s.Name)
 	expires := time.Now().Add(ttl).UTC()
 
-	if _, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{}); err == nil {
-		return nil, fmt.Errorf("environment %q already exists (namespace %s) — delete it first", s.Name, ns)
+	if existing, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{}); err == nil {
+		if existing.Status.Phase != corev1.NamespaceTerminating {
+			return nil, fmt.Errorf("environment %q already exists (namespace %s) — delete it first", s.Name, ns)
+		}
+		if err := m.waitForNamespaceGone(ctx, ns); err != nil {
+			return nil, fmt.Errorf("environment %q is still being deleted (namespace %s) — retry shortly", s.Name, ns)
+		}
 	}
 
 	if err := m.createNamespace(ctx, s, ns, expires); err != nil {
@@ -142,6 +147,9 @@ func (m *Manager) SweepExpired(ctx context.Context) ([]string, error) {
 	var deleted []string
 	for i := range list.Items {
 		ns := &list.Items[i]
+		if ns.Status.Phase == corev1.NamespaceTerminating {
+			continue
+		}
 		raw, ok := ns.Annotations[AnnotationExpiresAt]
 		if !ok {
 			continue
@@ -155,6 +163,27 @@ func (m *Manager) SweepExpired(ctx context.Context) ([]string, error) {
 		}
 	}
 	return deleted, nil
+}
+
+func (m *Manager) waitForNamespaceGone(ctx context.Context, ns string) error {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		_, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("namespace %s still terminating", ns)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func (m *Manager) createNamespace(ctx context.Context, s *slice.Slice, ns string, expires time.Time) error {
@@ -196,18 +225,14 @@ func (m *Manager) namespaceToEnv(ctx context.Context, ns *corev1.Namespace) (*En
 		env.Status = "ready"
 	}
 
-	pods, err := m.Client.CoreV1().Pods(ns.Name).List(ctx, metav1.ListOptions{})
+	svcs, err := m.Client.CoreV1().Services(ns.Name).List(ctx, metav1.ListOptions{
+		LabelSelector: LabelEnv + "=" + env.Name,
+	})
 	if err == nil {
-		seen := map[string]bool{}
-		for _, p := range pods.Items {
-			if len(p.OwnerReferences) > 0 {
-				continue
-			}
-			if !seen[p.Name] {
-				seen[p.Name] = true
-				env.Services = append(env.Services, p.Name)
-			}
+		for i := range svcs.Items {
+			env.Services = append(env.Services, svcs.Items[i].Name)
 		}
+		sort.Strings(env.Services)
 	}
 	return env, nil
 }

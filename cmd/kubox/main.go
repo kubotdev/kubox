@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
@@ -120,5 +121,11 @@ func newManager() (*env.Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	return env.NewManager(cs, cfg, ""), nil
+	m := env.NewManager(cs, cfg, "")
+	sctx, scancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer scancel()
+	if swept, err := m.SweepExpired(sctx); err == nil && len(swept) > 0 {
+		fmt.Fprintf(os.Stderr, "kubox: swept expired environment(s): %s\n", strings.Join(swept, ", "))
+	}
+	return m, nil
 }
