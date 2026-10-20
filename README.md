@@ -306,19 +306,21 @@ kubox test load --create fix-auth --slice myapp.kubox --ttl 1h \
 
 ## Use it with your agent
 
-kubox ships a skill that teaches coding agents the whole workflow — the
+kubox ships a skill that teaches coding agents the judgment layer — the
 break → fix → prove loop, plus load, recovery, scaling, and resource-pressure
-playbooks:
+playbooks, with hard rules (always TTL + teardown, thresholds are the
+contract, diagnose before fixing):
 
-```sh
-# opencode
-cp -r skill/kubox .opencode/skills/
+```bash
+# any Skills-aware agent (Claude Code, Cursor, opencode, …)
+curl -fsSL https://raw.githubusercontent.com/kubotdev/kubox/main/skills/install.sh | sh
 
-# Claude Code
-cp -r skill/kubox ~/.claude/skills/
-
-# Cursor / others: point them at skill/kubox/SKILL.md
+# or from a checkout
+cp -r skills/kubernetes-verification ~/.claude/skills/       # Claude Code
+cp -r skills/kubernetes-verification .opencode/skills/       # opencode (project)
 ```
+
+Details: [`skills/README.md`](skills/README.md).
 
 For the full tool surface (create, exec, test, delete from inside the
 session), also wire up the MCP server below.
