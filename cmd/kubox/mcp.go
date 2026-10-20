@@ -36,7 +36,10 @@ func newMCPCmd() *cobra.Command {
 					"production. kubox does not build or push images — build with " +
 					"docker (and `kind load docker-image` for kind, or push to a " +
 					"registry) before `up`/re-sync so pods pull the new version. " +
-					"For diagnostics (why is something unhealthy?), delegate to kubot.",
+					"If something is unhealthy, diagnose before fixing: if kubot " +
+					"is installed on the host, run `kubot inspect -n <namespace>` " +
+					"(read-only, same kubeconfig) and follow its findings; " +
+					"otherwise use `kubox exec` with kubectl describe/logs/events.",
 				Tools: kuboxTools(),
 			}
 			fmt.Fprintln(os.Stderr, "kubox mcp: serving on stdio (ctrl-c to stop)")

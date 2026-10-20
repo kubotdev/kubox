@@ -16,7 +16,9 @@
   <a href="#quickstart">Quickstart</a> ·
   <a href="#install">Install</a> ·
   <a href="#define-a-slice">Slices</a> ·
+  <a href="#test-infrastructure-not-just-traffic">Testing</a> ·
   <a href="#getting-images-into-the-environment">Images</a> ·
+  <a href="#use-it-with-your-agent">Agents</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#mcp">MCP</a> ·
   <a href="#roadmap">Roadmap</a>
@@ -93,6 +95,8 @@ Release binaries report their version via `kubox --version`; local
   needed.
 - **Docker** (or compatible) on the machine running kubox, to build the
   images your slice references — kubox never builds or pushes.
+- **metrics-server** if you use `scaling` (or want CPU-based HPA tests).
+  kind: `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
 
 ## How it works
 
@@ -119,6 +123,15 @@ app:
   port: 8080
   env:
     INVENTORY_URL: http://inventory:8080
+  healthcheck:
+    path: /healthz          # readiness + liveness probes
+  resources:                # requests default to 50m/64Mi
+    limitsCPU: "1"
+    limitsMemory: 512Mi
+  scaling:                  # optional HPA for the app
+    min: 2
+    max: 8
+    cpuPercent: 70
 dependencies:
   - name: inventory
     image: myregistry/inventory:latest
@@ -146,12 +159,65 @@ with `failed quota`.
 data survives pod restarts and re-syncs — use it for databases. The PVC is
 deleted together with the environment.
 
+`toolbox.image` (default `alpine/k8s:1.30.2`) swaps the toolbox pod's image —
+use it to bring extra tools (e.g. kubot) into the environment:
+
 ### Environments are re-syncable
 
 Run `kubox up` again with the same name to update a live environment from the
 slice: resources are applied, the TTL is refreshed, pods roll so a rebuilt
 image is picked up, removed services are pruned, and the command returns when
 every deployment is ready.
+
+### Health checks, resources, scaling
+
+- `healthcheck.path` adds readiness **and** liveness HTTP probes — "ready"
+  then means *the app answers*, not just *the pod is Running*. Liveness gets
+  10 extra seconds of initial delay so restarts don't race startup.
+- `resources` (`requestsCPU`/`requestsMemory` default 50m/64Mi; `limitsCPU`/
+  `limitsMemory` optional) set per-container requests and limits. Tight limits
+  let you test CPU throttling and OOMKill recovery.
+- `scaling` turns the `replicas` field into a managed HPA on the app
+  (min/max + average CPU target, default 70%). Re-syncs won't fight the HPA
+  for the replica count; removing `scaling` from the slice deletes the HPA.
+
+## Test infrastructure, not just traffic
+
+Load tests are the beginning. The environment is a full Kubernetes namespace,
+so an agent (or you) can run the drills that used to need a staging cluster:
+
+```sh
+# recovery: kill the app, watch it come back through its probe
+kubox exec demo -- kubectl delete pod -l app=payment
+kubox exec demo -- kubectl get pods -w
+
+# dependency restart: data survives via the PVC
+kubox exec demo -- kubectl delete pod -l app=postgres
+
+# manual horizontal scaling under load
+kubox exec demo -- kubectl autoscale deployment payment --min=2 --max=10 --cpu-percent=50
+kubox test load demo --script load.js
+kubox exec demo -- kubectl get hpa -w
+
+# resource pressure: set tight limits in the slice, re-sync, crush,
+# and watch throttle/OOMKill + restart
+kubox exec demo -- kubectl get pods -w
+```
+
+Diagnosing failures: if **[kubot](https://github.com/kubotdev/kubot)** is
+installed, run it against the environment's namespace (`kubot inspect -n
+kubox-demo`) for a read-only, findings-first report — it resolves the same
+kubeconfig. Without kubot, everything you need is already in the toolbox:
+`kubox exec demo -- kubectl describe pod <pod>`, `kubectl logs <pod>`, or
+`kubot` installed *inside* the environment via a custom `toolbox.image` in
+the slice (kubot supports in-cluster config).
+
+`scaling` needs [metrics-server](https://github.com/kubernetes-sigs/metrics-server)
+on the cluster (kind doesn't ship it):
+
+```sh
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+```
 
 ## Getting images into the environment
 
@@ -238,6 +304,25 @@ kubox test load --create fix-auth --slice myapp.kubox --ttl 1h \
 }
 ```
 
+## Use it with your agent
+
+kubox ships a skill that teaches coding agents the whole workflow — the
+break → fix → prove loop, plus load, recovery, scaling, and resource-pressure
+playbooks:
+
+```sh
+# opencode
+cp -r skill/kubox .opencode/skills/
+
+# Claude Code
+cp -r skill/kubox ~/.claude/skills/
+
+# Cursor / others: point them at skill/kubox/SKILL.md
+```
+
+For the full tool surface (create, exec, test, delete from inside the
+session), also wire up the MCP server below.
+
 ## MCP
 
 kubox runs as an MCP server so coding agents (Claude Code, Cursor, opencode,
@@ -292,7 +377,8 @@ kubox stays a **lifecycle + guardrails + measurement** layer — it will not
 grow a build system, a registry, or a UI. What's next, roughly:
 
 - **v0.2** — `kubox init` slice scaffold, `kubox build` (docker + `kind load`
-  convenience), a committed example app
+  convenience), a committed example app, an official toolbox image
+  (`kubotdev/kubox-toolbox`: kubectl + k6 + kubot for in-environment diagnosis)
 - **v0.3** — CI/PR one-shots and a GitHub Action (the `--create
   --delete-after --json` contract already exists)
 

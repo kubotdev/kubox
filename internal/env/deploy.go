@@ -6,6 +6,7 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -162,16 +163,25 @@ func (m *Manager) ensureServiceAccount(ctx context.Context, ns string) error {
 }
 
 func (m *Manager) deployApp(ctx context.Context, s *slice.Slice, ns string) error {
-	return m.deployService(ctx, deploySpec{
+	replicas := *s.App.Replicas
+	if s.App.Scaling != nil {
+		replicas = s.App.Scaling.Min
+	}
+	if err := m.deployService(ctx, deploySpec{
 		envName:   s.Name,
 		namespace: ns,
 		name:      s.AppServiceName(),
 		image:     s.App.Image,
-		replicas:  *s.App.Replicas,
+		replicas:  replicas,
 		port:      s.App.Port,
 		env:       s.App.Env,
 		res:       s.App.Resources,
-	})
+		health:    s.App.HealthCheck,
+		scaling:   s.App.Scaling,
+	}); err != nil {
+		return err
+	}
+	return m.ensureAppHPA(ctx, s, ns)
 }
 
 func (m *Manager) deployDependency(ctx context.Context, s *slice.Slice, d slice.Dependency, ns string) error {
@@ -304,6 +314,8 @@ type deploySpec struct {
 	res       slice.Resources
 	volume    *slice.Volume
 	recreate  bool
+	health    *slice.HealthCheck
+	scaling   *slice.Scaling
 }
 
 func (m *Manager) deployService(ctx context.Context, spec deploySpec) error {
@@ -327,7 +339,9 @@ func (m *Manager) deployService(ctx context.Context, spec deploySpec) error {
 	default:
 		updated := existingDep.DeepCopy()
 		updated.Labels = dep.Labels
-		updated.Spec.Replicas = dep.Spec.Replicas
+		if spec.scaling == nil {
+			updated.Spec.Replicas = dep.Spec.Replicas
+		}
 		updated.Spec.Selector = dep.Spec.Selector
 		updated.Spec.Template = dep.Spec.Template
 		if updated.Spec.Template.Annotations == nil {
@@ -385,6 +399,25 @@ func buildDeployment(spec deploySpec, labels map[string]string) *appsv1.Deployme
 			Name:      "data",
 			MountPath: spec.volume.Path,
 		}}
+	}
+
+	if spec.health != nil {
+		probe := &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: spec.health.Path,
+					Port: intstr.FromInt(spec.port),
+				},
+			},
+			InitialDelaySeconds: int32(spec.health.InitialDelaySeconds),
+			PeriodSeconds:       5,
+			TimeoutSeconds:      3,
+			FailureThreshold:    3,
+		}
+		podSpec.Containers[0].ReadinessProbe = probe
+		liveness := probe.DeepCopy()
+		liveness.InitialDelaySeconds += 10
+		podSpec.Containers[0].LivenessProbe = liveness
 	}
 
 	dep := &appsv1.Deployment{
@@ -471,3 +504,59 @@ func containerResources(r slice.Resources) corev1.ResourceRequirements {
 }
 
 func int32ptr(i int32) *int32 { return &i }
+
+func (m *Manager) ensureAppHPA(ctx context.Context, s *slice.Slice, ns string) error {
+	name := s.AppServiceName()
+	hpas := m.Client.AutoscalingV2().HorizontalPodAutoscalers(ns)
+	if s.App.Scaling == nil {
+		if err := hpas.Delete(ctx, name, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete hpa %s: %w", name, err)
+		}
+		return nil
+	}
+	min := int32(s.App.Scaling.Min)
+	cpuPercent := int32(s.App.Scaling.CPUPercent)
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: ns,
+			Labels:    commonLabels(s.Name, name),
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1",
+				Kind:       "Deployment",
+				Name:       name,
+			},
+			MinReplicas: &min,
+			MaxReplicas: int32(s.App.Scaling.Max),
+			Metrics: []autoscalingv2.MetricSpec{{
+				Type: autoscalingv2.ResourceMetricSourceType,
+				Resource: &autoscalingv2.ResourceMetricSource{
+					Name: corev1.ResourceCPU,
+					Target: autoscalingv2.MetricTarget{
+						Type:               autoscalingv2.UtilizationMetricType,
+						AverageUtilization: &cpuPercent,
+					},
+				},
+			}},
+		},
+	}
+	existing, err := hpas.Get(ctx, name, metav1.GetOptions{})
+	switch {
+	case apierrors.IsNotFound(err):
+		if _, err := hpas.Create(ctx, hpa, metav1.CreateOptions{}); err != nil {
+			return fmt.Errorf("create hpa %s: %w", name, err)
+		}
+	case err != nil:
+		return fmt.Errorf("get hpa %s: %w", name, err)
+	default:
+		updated := existing.DeepCopy()
+		updated.Labels = hpa.Labels
+		updated.Spec = hpa.Spec
+		if _, err := hpas.Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+			return fmt.Errorf("update hpa %s: %w", name, err)
+		}
+	}
+	return nil
+}

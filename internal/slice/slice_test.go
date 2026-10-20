@@ -89,6 +89,56 @@ func TestValidateRejectsDependencyWithoutImage(t *testing.T) {
 	}
 }
 
+func TestValidateScalingDefaults(t *testing.T) {
+	s := &Slice{Name: "x", App: App{Image: "img", Scaling: &Scaling{Max: 10}}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if s.App.Scaling.Min != 1 {
+		t.Errorf("Scaling.Min = %d, want 1 (default)", s.App.Scaling.Min)
+	}
+	if s.App.Scaling.CPUPercent != 70 {
+		t.Errorf("Scaling.CPUPercent = %d, want 70 (default)", s.App.Scaling.CPUPercent)
+	}
+}
+
+func TestValidateScalingErrors(t *testing.T) {
+	tests := []struct {
+		name    string
+		scaling Scaling
+	}{
+		{"max missing", Scaling{Min: 1}},
+		{"max below min", Scaling{Min: 3, Max: 2}},
+		{"cpu percent too high", Scaling{Min: 1, Max: 2, CPUPercent: 150}},
+	}
+	for _, tt := range tests {
+		s := &Slice{Name: "x", App: App{Image: "img", Scaling: &tt.scaling}}
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s: expected error", tt.name)
+		}
+	}
+}
+
+func TestValidateHealthCheck(t *testing.T) {
+	s := &Slice{Name: "x", App: App{Image: "img", HealthCheck: &HealthCheck{Path: "/healthz"}}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if s.App.HealthCheck.InitialDelaySeconds != 5 {
+		t.Errorf("InitialDelaySeconds = %d, want 5 (default)", s.App.HealthCheck.InitialDelaySeconds)
+	}
+
+	missing := &Slice{Name: "x", App: App{Image: "img", HealthCheck: &HealthCheck{}}}
+	if err := missing.Validate(); err == nil {
+		t.Error("expected error for missing healthcheck.path")
+	}
+
+	noSlash := &Slice{Name: "x", App: App{Image: "img", HealthCheck: &HealthCheck{Path: "healthz"}}}
+	if err := noSlash.Validate(); err == nil {
+		t.Error("expected error for healthcheck.path without leading slash")
+	}
+}
+
 func TestEnvNamespace(t *testing.T) {
 	if got := EnvNamespace("fix-auth"); got != "kubox-fix-auth" {
 		t.Errorf("EnvNamespace = %q", got)

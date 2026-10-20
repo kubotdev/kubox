@@ -20,12 +20,25 @@ type Slice struct {
 }
 
 type App struct {
-	Image     string            `yaml:"image"`
-	Replicas  *int              `yaml:"replicas"`
-	Port      int               `yaml:"port"`
-	Env       map[string]string `yaml:"env"`
-	Build     *Build            `yaml:"build"`
-	Resources Resources         `yaml:"resources"`
+	Image       string            `yaml:"image"`
+	Replicas    *int              `yaml:"replicas"`
+	Port        int               `yaml:"port"`
+	Env         map[string]string `yaml:"env"`
+	Build       *Build            `yaml:"build"`
+	Resources   Resources         `yaml:"resources"`
+	Scaling     *Scaling          `yaml:"scaling"`
+	HealthCheck *HealthCheck      `yaml:"healthcheck"`
+}
+
+type Scaling struct {
+	Min        int `yaml:"min"`
+	Max        int `yaml:"max"`
+	CPUPercent int `yaml:"cpuPercent"`
+}
+
+type HealthCheck struct {
+	Path                string `yaml:"path"`
+	InitialDelaySeconds int    `yaml:"initialDelaySeconds"`
 }
 
 type Resources struct {
@@ -125,6 +138,37 @@ func (s *Slice) Validate() error {
 	s.App.Resources = s.App.Resources.withDefaults()
 	for i := range s.Dependencies {
 		s.Dependencies[i].Resources = s.Dependencies[i].Resources.withDefaults()
+	}
+	if s.App.Scaling != nil {
+		if s.App.Scaling.Min == 0 {
+			s.App.Scaling.Min = 1
+		}
+		if s.App.Scaling.Min < 1 {
+			return fmt.Errorf("kubox.yaml: app.scaling.min must be >= 1, got %d", s.App.Scaling.Min)
+		}
+		if s.App.Scaling.Max == 0 {
+			return fmt.Errorf("kubox.yaml: app.scaling.max is required")
+		}
+		if s.App.Scaling.Max < s.App.Scaling.Min {
+			return fmt.Errorf("kubox.yaml: app.scaling.max (%d) must be >= min (%d)", s.App.Scaling.Max, s.App.Scaling.Min)
+		}
+		if s.App.Scaling.CPUPercent == 0 {
+			s.App.Scaling.CPUPercent = 70
+		}
+		if s.App.Scaling.CPUPercent < 1 || s.App.Scaling.CPUPercent > 100 {
+			return fmt.Errorf("kubox.yaml: app.scaling.cpuPercent must be 1-100, got %d", s.App.Scaling.CPUPercent)
+		}
+	}
+	if s.App.HealthCheck != nil {
+		if s.App.HealthCheck.Path == "" {
+			return fmt.Errorf("kubox.yaml: app.healthcheck.path is required")
+		}
+		if s.App.HealthCheck.Path[0] != '/' {
+			return fmt.Errorf("kubox.yaml: app.healthcheck.path must start with '/', got %q", s.App.HealthCheck.Path)
+		}
+		if s.App.HealthCheck.InitialDelaySeconds == 0 {
+			s.App.HealthCheck.InitialDelaySeconds = 5
+		}
 	}
 	for i, d := range s.Dependencies {
 		if d.Name == "" {
