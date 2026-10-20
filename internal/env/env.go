@@ -134,7 +134,24 @@ func (m *Manager) Delete(ctx context.Context, name string) error {
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+
+	deadline := time.After(readyTimeout)
+	for {
+		_, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("deleting %s: %w", ns, ctx.Err())
+		case <-deadline:
+			return nil
+		case <-time.After(time.Second):
+		}
+	}
 }
 
 func (m *Manager) Get(ctx context.Context, name string) (*Environment, error) {

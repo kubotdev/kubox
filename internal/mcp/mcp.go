@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"sync"
 )
 
 type Tool struct {
@@ -80,17 +81,36 @@ func negotiateProtocol(requested string) string {
 	}
 }
 
+type syncWriter struct {
+	mu sync.Mutex
+	w  *bufio.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, err := s.w.Write(p)
+	if err != nil {
+		return n, err
+	}
+	return n, s.w.Flush()
+}
+
 func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	r := bufio.NewReader(in)
-	w := bufio.NewWriter(out)
+	w := &syncWriter{w: bufio.NewWriter(out)}
 	proto := defaultProtocol
+	var protoMu sync.Mutex
+	var wg sync.WaitGroup
+	defer wg.Wait()
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
-			s.dispatch(ctx, line, w, &proto)
-			if err := w.Flush(); err != nil {
-				return err
-			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s.dispatch(ctx, line, w, &proto, &protoMu)
+			}()
 		}
 		if err != nil {
 			if err == io.EOF {
@@ -101,7 +121,7 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	}
 }
 
-func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *string) {
+func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *string, protoMu *sync.Mutex) {
 	var req rpcRequest
 	if err := json.Unmarshal(raw, &req); err != nil {
 		writeErr(w, nil, -32700, "parse error")
@@ -114,9 +134,12 @@ func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *s
 		var p struct {
 			ProtocolVersion string `json:"protocolVersion"`
 		}
+		protoMu.Lock()
 		if err := json.Unmarshal(req.Params, &p); err == nil && p.ProtocolVersion != "" {
 			*proto = negotiateProtocol(p.ProtocolVersion)
 		}
+		version := *proto
+		protoMu.Unlock()
 		caps := map[string]any{"tools": map[string]any{}}
 		if len(s.Prompts) > 0 {
 			caps["prompts"] = map[string]any{}
@@ -125,7 +148,7 @@ func (s *Server) dispatch(ctx context.Context, raw []byte, w io.Writer, proto *s
 			caps["resources"] = map[string]any{}
 		}
 		writeResult(w, req.ID, map[string]any{
-			"protocolVersion": *proto,
+			"protocolVersion": version,
 			"capabilities":    caps,
 			"serverInfo":      map[string]any{"name": s.Name, "version": s.Version},
 			"instructions":    s.Instructions,
