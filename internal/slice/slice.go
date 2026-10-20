@@ -45,6 +45,12 @@ type Dependency struct {
 	Port      int               `yaml:"port"`
 	Env       map[string]string `yaml:"env"`
 	Resources Resources         `yaml:"resources"`
+	Volume    *Volume           `yaml:"volume"`
+}
+
+type Volume struct {
+	Size string `yaml:"size"`
+	Path string `yaml:"path"`
 }
 
 type Quotas struct {
@@ -126,6 +132,14 @@ func (s *Slice) Validate() error {
 		}
 		if d.Image == "" {
 			return fmt.Errorf("kubox.yaml: dependencies[%d] %q needs an image", i, d.Name)
+		}
+		if d.Volume != nil {
+			if d.Volume.Size == "" {
+				return fmt.Errorf("kubox.yaml: dependencies[%d] %q volume.size is required", i, d.Name)
+			}
+			if d.Volume.Path == "" {
+				return fmt.Errorf("kubox.yaml: dependencies[%d] %q volume.path is required", i, d.Name)
+			}
 		}
 	}
 	return nil

@@ -43,54 +43,86 @@ type Manager struct {
 	Client       kubernetes.Interface
 	restCfg      *rest.Config
 	toolboxImage string
+	waitFn       func(context.Context, string) error
 }
 
 func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) *Manager {
 	if toolboxImage == "" {
 		toolboxImage = slice.DefaultToolboxImage
 	}
-	return &Manager{Client: cs, restCfg: cfg, toolboxImage: toolboxImage}
+	m := &Manager{Client: cs, restCfg: cfg, toolboxImage: toolboxImage}
+	m.waitFn = m.waitDeployments
+	return m
+}
+
+func (m *Manager) wait(ctx context.Context, ns string) error {
+	if m.waitFn != nil {
+		return m.waitFn(ctx, ns)
+	}
+	return m.waitDeployments(ctx, ns)
 }
 
 func (m *Manager) Create(ctx context.Context, s *slice.Slice, ttl time.Duration) (*Environment, error) {
+	env, err := m.ensure(ctx, s, ttl)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.wait(ctx, env.Namespace); err != nil {
+		return nil, err
+	}
+	return env, nil
+}
+
+func (m *Manager) ensure(ctx context.Context, s *slice.Slice, ttl time.Duration) (*Environment, error) {
 	ns := slice.EnvNamespace(s.Name)
 	expires := time.Now().Add(ttl).UTC()
+	createdAt := time.Now().UTC()
+	resync := false
 
 	if existing, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{}); err == nil {
-		if existing.Status.Phase != corev1.NamespaceTerminating {
-			return nil, fmt.Errorf("environment %q already exists (namespace %s) — delete it first", s.Name, ns)
-		}
-		if err := m.waitForNamespaceGone(ctx, ns); err != nil {
-			return nil, fmt.Errorf("environment %q is still being deleted (namespace %s) — retry shortly", s.Name, ns)
+		switch {
+		case existing.Status.Phase == corev1.NamespaceTerminating:
+			if err := m.waitForNamespaceGone(ctx, ns); err != nil {
+				return nil, fmt.Errorf("environment %q is still being deleted (namespace %s) — retry shortly", s.Name, ns)
+			}
+		case existing.Labels[LabelEnv] == s.Name:
+			resync = true
+			createdAt = existing.CreationTimestamp.Time.UTC()
+			if err := m.refreshTTL(ctx, existing, expires); err != nil {
+				return nil, err
+			}
+		default:
+			return nil, fmt.Errorf("namespace %s already exists and is not a kubox environment", ns)
 		}
 	}
 
-	if err := m.createNamespace(ctx, s, ns, expires); err != nil {
-		return nil, err
-	}
-	if err := m.applyQuota(ctx, s, ns); err != nil {
-		return nil, err
-	}
-	if err := m.applyNetworkPolicy(ctx, s, ns); err != nil {
-		return nil, err
-	}
-	if err := m.applyServiceAccount(ctx, ns); err != nil {
-		return nil, err
-	}
-	if err := m.deployApp(ctx, s, ns); err != nil {
-		return nil, err
-	}
-	for _, d := range s.Dependencies {
-		if err := m.deployDependency(ctx, s, d, ns); err != nil {
+	if !resync {
+		if err := m.createNamespace(ctx, s, ns, expires); err != nil {
 			return nil, err
 		}
 	}
+	if err := m.ensureQuota(ctx, s, ns); err != nil {
+		return nil, err
+	}
+	if err := m.ensureNetworkPolicy(ctx, s, ns); err != nil {
+		return nil, err
+	}
+	if err := m.ensureServiceAccount(ctx, ns); err != nil {
+		return nil, err
+	}
+	if err := m.deployAll(ctx, s, ns); err != nil {
+		return nil, err
+	}
 
+	status := "ready"
+	if resync {
+		status = "resynced"
+	}
 	return &Environment{
 		Name:      s.Name,
 		Namespace: ns,
-		Status:    "ready",
-		CreatedAt: time.Now().UTC(),
+		Status:    status,
+		CreatedAt: createdAt,
 		ExpiresAt: expires,
 		Services:  m.serviceNames(s),
 	}, nil

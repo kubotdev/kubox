@@ -19,6 +19,11 @@ func newUpCmd() *cobra.Command {
 			"environment: a namespace with resource quotas, a default-deny " +
 			"network policy, a service account, the app under test, and its " +
 			"in-cluster dependencies.\n\n" +
+			"If the environment already exists it is re-synced instead: " +
+			"resources are updated to match the slice, the TTL is refreshed, " +
+			"pods are rolled so the latest image is picked up, and removed " +
+			"services are pruned. The command returns once every deployment " +
+			"is ready.\n\n" +
 			"The environment carries a TTL; when it expires it is deleted " +
 			"automatically. Always set a TTL so a crashed agent cannot leak " +
 			"an environment.",
@@ -48,7 +53,11 @@ func newUpCmd() *cobra.Command {
 			}
 
 			out := cmd.OutOrStdout()
-			fmt.Fprintf(out, "Environment %q ready.\n", envObj.Name)
+			verb := "ready"
+			if envObj.Status == "resynced" {
+				verb = fmt.Sprintf("resynced (%d services rolled)", len(envObj.Services))
+			}
+			fmt.Fprintf(out, "Environment %q %s.\n", envObj.Name, verb)
 			fmt.Fprintf(out, "  namespace:  %s\n", envObj.Namespace)
 			fmt.Fprintf(out, "  expires:    %s\n", envObj.ExpiresAt.Format(time.RFC3339))
 			fmt.Fprintf(out, "  services:   %v\n", envObj.Services)

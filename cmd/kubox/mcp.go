@@ -48,8 +48,10 @@ func kuboxTools() []mcp.Tool {
 		{
 			Name: "up",
 			Description: "Create a disposable Kubernetes environment from a slice " +
-				"directory. Returns the environment name, namespace, and services. " +
-				"Always set a ttl so a crashed agent cannot leak the environment.",
+				"directory; if it already exists, re-sync it (update resources, " +
+				"refresh ttl, roll pods to pick up rebuilt images). Returns the " +
+				"environment name, namespace, and services. Always set a ttl so " +
+				"a crashed agent cannot leak the environment.",
 			InputSchema: map[string]any{
 				"type":     "object",
 				"required": []string{"slice_dir", "name"},

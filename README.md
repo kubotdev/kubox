@@ -50,6 +50,9 @@ dependencies:
     port: 5432
     env:
       POSTGRES_PASSWORD: kubox
+    volume:
+      size: 1Gi
+      path: /var/lib/postgresql/data
 quotas:
   cpu: "2"
   memory: 4Gi
@@ -58,11 +61,15 @@ quotas:
 
 Quotas are namespace-wide, so size them to cover the app, its dependencies, *and* kubox's own pods: the toolbox (50m/64Mi) and the k6 test runner (100m/64Mi). If `cpu`/`memory` headroom is too tight, pod creation fails with `failed quota`.
 
+`volume` gives a dependency a persistent disk (PVC) mounted at `path`, so its data survives pod restarts and re-syncs — use it for databases. The PVC is deleted together with the environment.
+
 ### 2. Create an environment
 
 ```sh
 kubox up myapp.kubox --name fix-auth --ttl 1h
 ```
+
+Run `kubox up` again with the same name to re-sync a live environment: resources are updated from the slice, the TTL is refreshed, pods roll so a rebuilt image is picked up, and the command returns when every deployment is ready.
 
 ### 3. Run commands inside it
 
@@ -158,7 +165,7 @@ Tools: `up`, `down`, `exec`, `list`, `status`, `test_load`.
 
 | Command | What it does |
 |---|---|
-| `kubox up <slice> --name N --ttl 1h` | Deploy a slice into an isolated namespace |
+| `kubox up <slice> --name N --ttl 1h` | Deploy a slice; re-syncs (rolls pods) if the environment exists |
 | `kubox down N` | Delete an environment |
 | `kubox exec N -- <cmd>` | Run a command in the environment's toolbox |
 | `kubox exec --create N --slice D --delete-after -- <cmd>` | One-shot: create, run, delete |
