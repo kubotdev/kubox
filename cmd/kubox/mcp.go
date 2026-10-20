@@ -33,8 +33,10 @@ func newMCPCmd() *cobra.Command {
 					"to run commands inside it, `test_load` to run a k6 load " +
 					"test, and `down` to delete it. Always set a TTL. Environments " +
 					"are namespace-scoped and network-isolated; they cannot touch " +
-					"production. For diagnostics (why is something unhealthy?), " +
-					"delegate to kubot.",
+					"production. kubox does not build or push images — build with " +
+					"docker (and `kind load docker-image` for kind, or push to a " +
+					"registry) before `up`/re-sync so pods pull the new version. " +
+					"For diagnostics (why is something unhealthy?), delegate to kubot.",
 				Tools: kuboxTools(),
 			}
 			fmt.Fprintln(os.Stderr, "kubox mcp: serving on stdio (ctrl-c to stop)")
