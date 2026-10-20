@@ -15,7 +15,6 @@ type Slice struct {
 	Dependencies  []Dependency  `yaml:"dependencies"`
 	Quotas        Quotas        `yaml:"quotas"`
 	NetworkPolicy NetworkPolicy `yaml:"networkPolicy"`
-	Tests         []TestDef     `yaml:"tests"`
 	Toolbox       Toolbox       `yaml:"toolbox"`
 }
 
@@ -74,11 +73,6 @@ type Quotas struct {
 
 type NetworkPolicy struct {
 	Default string `yaml:"default"`
-}
-
-type TestDef struct {
-	Name string `yaml:"name"`
-	Run  string `yaml:"run"`
 }
 
 type Toolbox struct {
