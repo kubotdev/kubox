@@ -72,8 +72,10 @@ exits non-zero when they're violated — that's the signal to **fix, not loosen*
 Save the failing run's JSON for the after-comparison.
 
 ### Recovery
+- Dependency first: `kubox test drill <env> --dependency postgres --json` — the
+  standardized drill: deletes the dep's pods, times recovery on both sides, and
+  returns a diagnosis (dep slow to restart vs app missing reconnect logic).
 - App: `kubox exec <env> -- kubectl delete pod -l app=<svc>` — watch recreation + probe.
-- Dependency: same for `app=postgres`; with a volume, data survives.
 - Then probe health + a quick load loop — reconnect bugs (SYN_SENT, pool exhaustion) surface here.
 
 ### Horizontal scaling
@@ -116,6 +118,11 @@ Don't stall; each gap has one fix:
 7. **`exec` is one-shot, non-interactive.** Use `sh -c '...'` for pipes and loops.
 8. **The toolbox SA is namespace-scoped `edit`.** Scale/delete/patch work inside the
    environment; nodes, namespaces, and PVs are out of reach — by design.
+9. **Read the failure kind before fixing.** In verification output (`test load --report`,
+   `test drill`), `status: "error"` + exit 3 means the *environment* is unhealthy and
+   checks didn't run — fix the env/slice (image, quota, crashlooping dep) and re-run;
+   never change app code for an `error`. Only `status: "fail"` + exit 1 implicates
+   your change.
 
 ## Output shape
 

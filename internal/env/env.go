@@ -44,6 +44,9 @@ type Manager struct {
 	restCfg      *rest.Config
 	toolboxImage string
 	waitFn       func(context.Context, string) error
+	// probeFn checks that the app answers (HTTP when a healthcheck path is
+	// known, TCP otherwise); overridable in tests.
+	probeFn func(ctx context.Context, envName, host string, port int32, healthPath string) error
 }
 
 func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) *Manager {
@@ -52,6 +55,7 @@ func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) 
 	}
 	m := &Manager{Client: cs, restCfg: cfg, toolboxImage: toolboxImage}
 	m.waitFn = m.waitDeployments
+	m.probeFn = m.defaultProbe
 	return m
 }
 

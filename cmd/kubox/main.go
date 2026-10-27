@@ -32,9 +32,10 @@ func appVersion() string {
 }
 
 const (
-	exitFailure = 1
-	exitNoAuth  = 2
-	exitUsage   = 64
+	exitFailure      = 1
+	exitNoAuth       = 2
+	exitEnvUnhealthy = 3
+	exitUsage        = 64
 )
 
 var (

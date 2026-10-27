@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -31,7 +32,9 @@ func newMCPCmd() *cobra.Command {
 				Instructions: "kubox provisions disposable, isolated Kubernetes " +
 					"environments. Use `up` to create one from a slice, `exec` " +
 					"to run commands inside it, `test_load` to run a k6 load " +
-					"test, and `down` to delete it. Always set a TTL. Environments " +
+					"test, `test_drill` to run failure drills (restart a " +
+					"dependency and verify the app recovers), and `down` to " +
+					"delete it. Always set a TTL. Environments " +
 					"are namespace-scoped and network-isolated; they cannot touch " +
 					"production. kubox does not build or push images — build with " +
 					"docker (and `kind load docker-image` for kind, or push to a " +
@@ -157,6 +160,42 @@ func kuboxTools() []mcp.Tool {
 			},
 			Handler: testLoadTool,
 		},
+		{
+			Name: "test_drill",
+			Description: "Run a failure drill against an environment (restart a " +
+				"dependency and verify the app recovers). Preflights the " +
+				"environment first: if it is unhealthy no fault is injected " +
+				"and the report status is \"error\", not \"fail\". Returns a " +
+				"verification report: status pass|fail|error, environment " +
+				"health, and per-phase evidence (recovery timings).",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"name"},
+				"properties": map[string]any{
+					"name": map[string]any{
+						"type":        "string",
+						"description": "Environment name.",
+					},
+					"type": map[string]any{
+						"type":        "string",
+						"description": "Drill type. Currently only 'dependency-restart' (default).",
+					},
+					"dependency": map[string]any{
+						"type":        "string",
+						"description": "Dependency to target (a service of the environment). Mutually exclusive with 'all'.",
+					},
+					"all": map[string]any{
+						"type":        "boolean",
+						"description": "Run the drill against every dependency in the environment.",
+					},
+					"timeout": map[string]any{
+						"type":        "string",
+						"description": "Per-phase observation budget, e.g. '2m'. Default 2m.",
+					},
+				},
+			},
+			Handler: testDrillTool,
+		},
 	}
 }
 
@@ -278,6 +317,77 @@ func testLoadTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return marshalJSON(result)
+}
+
+func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args struct {
+		Name       string `json:"name"`
+		Type       string `json:"type"`
+		Dependency string `json:"dependency"`
+		All        bool   `json:"all"`
+		Timeout    string `json:"timeout"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return "", fmt.Errorf("invalid params: %w", err)
+	}
+	drillType := args.Type
+	if drillType == "" {
+		drillType = env.DrillDependencyRestart
+	}
+	if args.All && args.Dependency != "" {
+		return "", fmt.Errorf("'dependency' and 'all' are mutually exclusive")
+	}
+	if !args.All && args.Dependency == "" {
+		return "", fmt.Errorf("either 'dependency' or 'all' is required")
+	}
+	var timeoutDur time.Duration
+	if args.Timeout != "" {
+		d, err := time.ParseDuration(args.Timeout)
+		if err != nil {
+			return "", fmt.Errorf("invalid timeout %q: %w", args.Timeout, err)
+		}
+		timeoutDur = d
+	}
+
+	m, err := newManager()
+	if err != nil {
+		return "", err
+	}
+	targets := []string{args.Dependency}
+	if args.All {
+		e, err := m.Get(ctx, args.Name)
+		if err != nil {
+			return "", err
+		}
+		targets = targets[:0]
+		for _, svc := range e.Services {
+			if svc != args.Name {
+				targets = append(targets, svc)
+			}
+		}
+		if len(targets) == 0 {
+			return "", fmt.Errorf("environment %q has no dependencies to drill", args.Name)
+		}
+	}
+
+	var checks []env.Check
+	var health env.EnvHealth
+	for _, target := range targets {
+		res, err := m.RunDrill(ctx, args.Name, env.DrillSpec{
+			Type:       drillType,
+			Dependency: target,
+			Timeout:    timeoutDur,
+		})
+		if err != nil {
+			return "", err
+		}
+		health = res.Environment
+		if !health.Healthy {
+			break
+		}
+		checks = append(checks, res.Check)
+	}
+	return marshalJSON(env.NewReport(health, checks...))
 }
 
 func marshalJSON(v any) (string, error) {

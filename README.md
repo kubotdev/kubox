@@ -304,6 +304,102 @@ kubox test load --create fix-auth --slice myapp.kubox --ttl 1h \
 }
 ```
 
+Add `--report` to get the **verification envelope** instead — environment
+health plus per-check findings (the raw k6 result stays embedded in
+`checks[].detail`). The envelope tells an agent *why* it failed and, just as
+importantly, *what kind* of failure it is:
+
+```sh
+kubox test load fix-auth --script load.js --report --json
+```
+
+```json
+{
+  "status": "fail",
+  "environment": { "healthy": true, "namespace": "kubox-fix-auth", "problems": [] },
+  "checks": [
+    {
+      "type": "load",
+      "status": "fail",
+      "duration_ms": 103422,
+      "findings": [
+        {
+          "metric": "http_req_duration_p95_lt_200",
+          "expected": "pass",
+          "actual": "347",
+          "message": "threshold http_req_duration_p95_lt_200 not met (value 347)"
+        }
+      ],
+      "detail": { "status": "fail", "exit_code": 1, "thresholds": { "…": {} } }
+    }
+  ]
+}
+```
+
+The three statuses drive the agent's loop, mirrored by the exit code:
+
+| Status | Exit | Means | Agent does |
+|---|---|---|---|
+| `pass` | 0 | verified | report done |
+| `fail` | 1 | app lost a check it actually ran | fix code, re-run |
+| `error` | 3 | environment unhealthy — **checks not run** | fix the env/slice, don't touch app code |
+
+## Drills: failure experiments with evidence
+
+Load tests probe traffic. Drills probe **failure** — the faults production
+throws at you that a perfect-world test never sees. The slice already
+declares your app's dependency surface, so kubox can run the drills
+mechanically:
+
+```sh
+kubox test drill fix-auth --dependency postgres --json
+```
+
+The `dependency-restart` drill deletes the dependency's pods and verifies
+recovery on both sides: the dependency comes back Ready, the app answers its
+health probe again, and replicas return to full capacity. Each phase is
+timed, so a failure pinpoints *where* recovery broke:
+
+```json
+{
+  "status": "fail",
+  "environment": { "healthy": true, "namespace": "kubox-fix-auth", "problems": [] },
+  "checks": [
+    {
+      "type": "drill:dependency-restart",
+      "status": "fail",
+      "duration_ms": 94210,
+      "findings": [
+        {
+          "metric": "app_recovery_seconds",
+          "expected": "<2m0s",
+          "actual": "timeout after 2m0s",
+          "message": "postgres restarted in 14.2s, but the app never recovered within 2m0s — likely missing reconnect/error-handling logic"
+        }
+      ],
+      "detail": {
+        "target": "postgres",
+        "fault": "delete-pods",
+        "phases": [
+          { "name": "inject",             "status": "pass", "duration_ms": 310 },
+          { "name": "dependency_ready",   "status": "pass", "duration_ms": 14220 },
+          { "name": "app_recovered",      "status": "timeout", "duration_ms": 120000 },
+          { "name": "app_replicas_ready", "status": "skipped" },
+          { "name": "settle",             "status": "skipped" }
+        ]
+      }
+    }
+  ]
+}
+```
+
+Because both sides are measured, the finding contains the diagnosis: the
+dependency recovered fine, the app didn't reconnect — that's an app bug, and
+now the agent knows exactly which one to fix. Use `--all` to drill every
+dependency, `--create --delete-after` for the one-shot form. The environment
+is preflighted first; an unhealthy sandbox returns `error` (exit 3), never a
+misleading `fail`.
+
 ## Use it with your agent
 
 kubox ships a skill that teaches coding agents the judgment layer — the
@@ -358,7 +454,7 @@ timeout if you run load tests through it (k6 runs can exceed the default):
 }
 ```
 
-Tools: `up`, `down`, `exec`, `list`, `status`, `test_load`.
+Tools: `up`, `down`, `exec`, `list`, `status`, `test_load`, `test_drill`.
 
 ## Commands
 
@@ -370,7 +466,8 @@ Tools: `up`, `down`, `exec`, `list`, `status`, `test_load`.
 | `kubox exec --create N --slice D --delete-after -- <cmd>` | One-shot: create, run, delete |
 | `kubox list` | List live environments |
 | `kubox status N` | Show one environment's status |
-| `kubox test load N --script f.js` | Run a k6 load test (`--json` for machines) |
+| `kubox test load N --script f.js` | Run a k6 load test (`--json` for machines, `--report` for the verification envelope) |
+| `kubox test drill N --dependency d` | Failure drill: restart a dependency, verify the app recovers (`--all`, `--json`) |
 | `kubox mcp` | Run as an MCP server |
 
 ## Roadmap
@@ -381,8 +478,14 @@ grow a build system, a registry, or a UI. What's next, roughly:
 - **v0.2** — `kubox init` slice scaffold, `kubox build` (docker + `kind load`
   convenience), a committed example app, an official toolbox image
   (`kubotdev/kubox-toolbox`: kubectl + k6 + kubot for in-environment diagnosis)
-- **v0.3** — CI/PR one-shots and a GitHub Action (the `--create
+- **v0.3** — more drills derived from the slice (`resource-pressure`,
+  `scale-under-load`), CI/PR one-shots and a GitHub Action (the `--create
   --delete-after --json` contract already exists)
+
+Already in: the verification envelope (`--report`, `test drill`) and the
+`dependency-restart` drill — see
+[`docs/verification-contract.md`](docs/verification-contract.md) and
+[`docs/test-drill.md`](docs/test-drill.md).
 
 Feedback and issues welcome — this is early, and direction is still being
 shaped.
