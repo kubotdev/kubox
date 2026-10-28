@@ -21,6 +21,7 @@
   <a href="#use-it-with-your-agent">Agents</a> ·
   <a href="#commands">Commands</a> ·
   <a href="#mcp">MCP</a> ·
+  <a href="docs/">Docs</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
 
@@ -484,8 +485,7 @@ grow a build system, a registry, or a UI. What's next, roughly:
 
 Already in: the verification envelope (`--report`, `test drill`) and the
 `dependency-restart` drill — see
-[`docs/verification-contract.md`](docs/verification-contract.md) and
-[`docs/test-drill.md`](docs/test-drill.md).
+[docs/json.md](docs/json.md) and [docs/testing.md](docs/testing.md).
 
 Feedback and issues welcome — this is early, and direction is still being
 shaped.
