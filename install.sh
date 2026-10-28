@@ -9,10 +9,6 @@
 # is available (keyless, GitHub Actions OIDC).
 set -eu
 
-# Git Bash rewrites slash-containing args (URLs, regexps) into Windows paths
-# unless told not to — which silently breaks the cosign identity match below.
-export MSYS_NO_PATHCONV=1
-
 REPO="kubotdev/kubox"
 VERSION="${KUBOX_VERSION:-latest}"
 INSTALL_DIR="${KUBOX_INSTALL_DIR:-/usr/local/bin}"
@@ -69,7 +65,11 @@ verify_signature() {
     echo "no signature bundle published — checksum verified only"
     return 0
   fi
-  (cd "$tmp" && cosign verify-blob --bundle checksums.txt.cosign.bundle \
+  # Git Bash rewrites backslash-containing args (the identity regexp) into
+  # Windows paths, which silently breaks the match — disable conversion for
+  # this one call only. Globally exporting MSYS_NO_PATHCONV would stop curl's
+  # /tmp and /dev/null paths from converting too, breaking the install.
+  (cd "$tmp" && MSYS_NO_PATHCONV=1 cosign verify-blob --bundle checksums.txt.cosign.bundle \
     --certificate-identity-regexp "^https://github.com/$REPO/\.github/workflows/release\.yml@" \
     --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt) || {
     echo "signature verification FAILED — aborted" >&2; exit 1
