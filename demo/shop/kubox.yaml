@@ -1,0 +1,39 @@
+name: shop
+app:
+  image: kubox-demo:v1
+  build:
+    context: app
+  port: 8080
+  env:
+    DEMO_ROLE: orders
+    POSTGRES_HOST: postgres
+    POSTGRES_PORT: "5432"
+    POSTGRES_USER: shop
+    POSTGRES_PASSWORD: shop
+    POSTGRES_DB: shop
+    INVENTORY_URL: http://inventory:8080
+dependencies:
+  - name: inventory
+    image: kubox-demo:v1
+    port: 8080
+    env:
+      DEMO_ROLE: inventory
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+  - name: postgres
+    image: postgres:16-alpine
+    port: 5432
+    env:
+      POSTGRES_USER: shop
+      POSTGRES_PASSWORD: shop
+      POSTGRES_DB: shop
+    volume:
+      size: 1Gi
+      path: /var/lib/postgresql/data
+quotas:
+  cpu: "1"
+  memory: 768Mi
+  pods: "10"
