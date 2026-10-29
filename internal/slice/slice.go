@@ -80,7 +80,7 @@ type Toolbox struct {
 	Image string `yaml:"image"`
 }
 
-const DefaultToolboxImage = "alpine/k8s:1.30.2"
+const DefaultToolboxImage = "ghcr.io/kubotdev/kubox-toolbox:latest"
 
 func Load(dir string) (*Slice, string, error) {
 	path := dir
