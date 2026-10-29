@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,14 +32,16 @@ func newMCPCmd() *cobra.Command {
 				Version: appVersion(),
 				Instructions: "kubox provisions disposable, isolated Kubernetes " +
 					"environments. Use `up` to create one from a slice, `exec` " +
-					"to run commands inside it, `test_load` to run a k6 load " +
+					"to run commands inside it, `build` to build the slice's " +
+					"app image (docker + `kind load` when the context is kind), " +
+					"`test_load` to run a k6 load " +
 					"test, `test_drill` to run failure drills (restart a " +
 					"dependency and verify the app recovers), and `down` to " +
 					"delete it. Always set a TTL. Environments " +
 					"are namespace-scoped and network-isolated; they cannot touch " +
-					"production. kubox does not build or push images — build with " +
-					"docker (and `kind load docker-image` for kind, or push to a " +
-					"registry) before `up`/re-sync so pods pull the new version. " +
+					"production. `build` handles the docker + `kind load` step " +
+					"for kind clusters; for anything else push the image to a " +
+					"registry before `up`/re-sync so pods pull the new version. " +
 					"If something is unhealthy, diagnose before fixing: if kubot " +
 					"is installed on the host, run `kubot inspect -n <namespace>` " +
 					"(read-only, same kubeconfig) and follow its findings; " +
@@ -79,6 +82,28 @@ func kuboxTools() []mcp.Tool {
 				},
 			},
 			Handler: upTool,
+		},
+		{
+			Name: "build",
+			Description: "Build the slice's app image with docker and load it " +
+				"into the kind cluster when the kubeconfig context is kind. " +
+				"Requires app.build.context in the slice and docker (plus " +
+				"kind) on the host. Returns the image tag built.",
+			InputSchema: map[string]any{
+				"type":     "object",
+				"required": []string{"slice_dir"},
+				"properties": map[string]any{
+					"slice_dir": map[string]any{
+						"type":        "string",
+						"description": "Path to the directory containing kubox.yaml",
+					},
+					"no_load": map[string]any{
+						"type":        "boolean",
+						"description": "Build only; skip loading the image into a kind cluster.",
+					},
+				},
+			},
+			Handler: buildTool,
 		},
 		{
 			Name: "down",
@@ -228,6 +253,26 @@ func upTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	return marshalJSON(e)
+}
+
+func buildTool(ctx context.Context, raw json.RawMessage) (string, error) {
+	var args struct {
+		SliceDir string `json:"slice_dir"`
+		NoLoad   bool   `json:"no_load"`
+	}
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return "", fmt.Errorf("invalid params: %w", err)
+	}
+	var log bytes.Buffer
+	image, err := runBuild(ctx, args.SliceDir, args.NoLoad, &log)
+	if err != nil {
+		return "", err
+	}
+	return marshalJSON(map[string]any{
+		"status": "built",
+		"image":  image,
+		"log":    log.String(),
+	})
 }
 
 func downTool(ctx context.Context, raw json.RawMessage) (string, error) {

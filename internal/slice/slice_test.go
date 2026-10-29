@@ -74,6 +74,37 @@ func TestValidateRejectsMissingImage(t *testing.T) {
 	if err := s.Validate(); err == nil {
 		t.Error("expected error for missing app.image")
 	}
+	// even with build set: the image is the tag build produces and up deploys
+	s = &Slice{Name: "x", App: App{Build: &Build{Context: "app"}}}
+	if err := s.Validate(); err == nil {
+		t.Error("expected error for missing app.image with build set")
+	}
+}
+
+func TestValidateBuild(t *testing.T) {
+	// context required when build is set
+	noCtx := &Slice{Name: "x", App: App{Image: "img", Build: &Build{}}}
+	if err := noCtx.Validate(); err == nil {
+		t.Error("expected error for build without context")
+	}
+
+	// dockerfile defaults to Dockerfile in the context
+	s := &Slice{Name: "x", App: App{Image: "img", Build: &Build{Context: "app"}}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if s.App.Build.Dockerfile != "Dockerfile" {
+		t.Errorf("Build.Dockerfile = %q, want Dockerfile (default)", s.App.Build.Dockerfile)
+	}
+
+	// explicit dockerfile is kept
+	s = &Slice{Name: "x", App: App{Image: "img", Build: &Build{Context: "app", Dockerfile: "Dockerfile.prod"}}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if s.App.Build.Dockerfile != "Dockerfile.prod" {
+		t.Errorf("Build.Dockerfile = %q, want Dockerfile.prod", s.App.Build.Dockerfile)
+	}
 }
 
 func TestValidateRejectsDependencyWithoutImage(t *testing.T) {

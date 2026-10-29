@@ -48,7 +48,8 @@ type Resources struct {
 }
 
 type Build struct {
-	Context string `yaml:"context"`
+	Context    string `yaml:"context"`
+	Dockerfile string `yaml:"dockerfile"`
 }
 
 type Dependency struct {
@@ -104,8 +105,14 @@ func (s *Slice) Validate() error {
 	if s.Name == "" {
 		return fmt.Errorf("kubox.yaml: name is required")
 	}
-	if s.App.Image == "" && s.App.Build == nil {
-		return fmt.Errorf("kubox.yaml: app.image (or app.build) is required")
+	if s.App.Image == "" {
+		return fmt.Errorf("kubox.yaml: app.image is required (the tag `kubox build` produces and `up` deploys)")
+	}
+	if s.App.Build != nil && s.App.Build.Context == "" {
+		return fmt.Errorf("kubox.yaml: app.build.context is required when app.build is set")
+	}
+	if s.App.Build != nil && s.App.Build.Dockerfile == "" {
+		s.App.Build.Dockerfile = "Dockerfile"
 	}
 	if s.App.Port == 0 {
 		s.App.Port = 8080

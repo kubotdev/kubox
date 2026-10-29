@@ -62,6 +62,8 @@ func main() {
 		SilenceErrors: true,
 		Version:       appVersion(),
 	}
+	root.AddCommand(newInitCmd())
+	root.AddCommand(newBuildCmd())
 	root.AddCommand(newUpCmd())
 	root.AddCommand(newDownCmd())
 	root.AddCommand(newExecCmd())
