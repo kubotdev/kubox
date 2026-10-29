@@ -5,6 +5,8 @@ Global flags (every command): `--kubeconfig`, `--context`, `--timeout`
 
 | Command | What it does |
 |---|---|
+| `init <dir>` | Scaffold a slice: `kubox.yaml` + starter `tests/load.js` (`--force` to overwrite) |
+| `build <slice>` | `docker build` the `app.build.context` as `app.image`; `kind load` when the context is kind (`--no-load` to skip) |
 | `up <slice> --name N --ttl 1h` | Deploy a slice; re-syncs (rolls pods) if the environment exists |
 | `down N` | Delete an environment and everything in it (waits until it's gone) |
 | `exec N -- <cmd>` | Run a command in the environment's toolbox pod |

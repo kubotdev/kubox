@@ -24,19 +24,20 @@ results or tune thresholds until they pass.
 1. Define the slice (`kubox.yaml` below) — app + its real dependencies.
 2. `kubox up` — deploy. Re-running `up` after a rebuild **re-syncs** (rolls pods, keeps data volumes).
 3. Break it or load it. Watch it fail. Keep the evidence (p95, error rate, events, logs).
-4. Diagnose → fix → rebuild → `kubox up` again (same name).
+4. Diagnose → fix → rebuild (`kubox build`) → `kubox up` again (same name).
 5. Prove it: the **same test** must now pass. Report before/after numbers.
 6. `kubox down` — always, even after failures.
 
 ## How to run it
 
-**If the kubox MCP server is connected**, use its tools: `up`, `exec`,
-`test_load`, `list`, `status`, `down`. Always pass a `ttl` to `up`.
+**If the kubox MCP server is connected**, use its tools: `up`, `build`,
+`exec`, `test_load`, `list`, `status`, `down`. Always pass a `ttl` to `up`.
 
 **Otherwise the CLI.** Namespace is always `kubox-<name>`.
 
 | Question | Command |
 |---|---|
+| Build the slice's app image | `kubox build <dir>` (`docker build` + `kind load`; `app.build.context` in the slice) |
 | Deploy / update a slice | `kubox up <dir> --name <env> --ttl 1h` |
 | What's alive / when does it expire? | `kubox list` · `kubox status <env>` |
 | Run something inside the environment | `kubox exec <env> -- <cmd>` (kubectl, curl, sh) |
@@ -49,7 +50,7 @@ results or tune thresholds until they pass.
 ```yaml
 name: shop
 app:
-  image: shop:v1              # kubox never builds — docker build + kind load first
+  image: shop:v1              # produced by `kubox build` (app.build below) or a registry image
   port: 8080
   env: {DATABASE_URL: postgres://postgres:kubox@postgres:5432/shop}
   resources: {limitsCPU: "1", limitsMemory: 512Mi}   # requests default 50m/64Mi
@@ -87,8 +88,9 @@ Save the failing run's JSON for the after-comparison.
 - Tight `limitsCPU`/`limitsMemory` → re-sync → crush. Watch throttle/OOMKill (exit 137) + restart.
 
 ### Images
-`docker build -t <img> .` → `kind load docker-image <img> --name <cluster>` (or push
-to a registry) → `kubox up` again. Pods roll to the new image; volumes survive.
+`kubox build <slice>` (`app.build.context` in the slice) → `kubox up` again, or the
+manual path: `docker build -t <img> .` → `kind load docker-image <img> --name <cluster>`
+(or push to a registry). Pods roll to the new image; volumes survive.
 
 ## First run — when something is missing
 
@@ -96,7 +98,7 @@ Don't stall; each gap has one fix:
 
 - **`kubox` not on PATH:** install — `curl -fsSL https://raw.githubusercontent.com/kubotdev/kubox/main/skills/install.sh | sh` (or `go install github.com/kubotdev/kubox/cmd/kubox@latest`).
 - **No cluster / kubeconfig:** `kind create cluster` (~30s), or ask the user for the context. kubox resolves kubeconfig exactly like kubectl.
-- **ImagePullBackOff after `up`:** the image isn't in the cluster — build it, then `kind load docker-image` or push to a registry; `up` again to re-sync.
+- **ImagePullBackOff after `up`:** the image isn't in the cluster — `kubox build <slice>` (or build + `kind load docker-image` / registry push yourself); `up` again to re-sync.
 - **`failed quota` on pod creation:** raise `quotas` — it must cover app + deps + toolbox (50m/64Mi) + k6 runner (100m/64Mi).
 - **HPA not moving under load:** metrics-server missing — `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`.
 - **MCP load tests die at ~10s:** set the kubox MCP server `timeout` to `180000`.
@@ -111,7 +113,8 @@ Don't stall; each gap has one fix:
    evidence: p95/p99, error rate, restarts, exit codes. One table beats adjectives.
 4. **Re-sync, don't recreate.** Same name = in-place update with data volumes intact.
    Delete only when you intentionally want a from-scratch state.
-5. **kubox never builds.** docker (or compatible) + `kind load` / registry push, then re-sync.
+5. **kubox build is a convenience, not a build service.** It runs `docker build` +
+   `kind load` for kind. Remote clusters: registry push is yours. Then re-sync.
 6. **Diagnose before fixing.** If kubot is installed: `kubot inspect -n kubox-<env>`
    (read-only, findings-first). Otherwise: `kubectl describe/logs/events` via exec.
    Never guess a root cause the data doesn't support.

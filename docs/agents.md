@@ -39,7 +39,7 @@ The agent performs, per task:
 | create | `kubox up <slice> --name task-42 --ttl 30m` (or `--create`) |
 | verify under load | `kubox test load task-42 --script load.js --report --json` |
 | verify against failure | `kubox test drill task-42 --all --json` |
-| fix | edit code → rebuild image → `kubox up` again (re-sync rolls pods) |
+| fix | edit code → `kubox build` → `kubox up` again (re-sync rolls pods) |
 | prove | re-run the checks — `pass` plus the findings is the evidence |
 | destroy | `kubox down task-42` (or `--delete-after`; TTL is the backstop) |
 

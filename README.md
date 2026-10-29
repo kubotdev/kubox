@@ -50,8 +50,10 @@ agents a safe place to make it right, and a pass/fail signal they can read.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/kubotdev/kubox/main/install.sh | sh
 kind create cluster              # skip if you already have a cluster
-kubox up ./myapp.kubox --name demo --ttl 1h
-kubox test load demo --script tests/load.js
+kubox init myapp.kubox           # scaffold a slice + a k6 load test
+kubox build myapp.kubox          # optional: docker build + kind load
+kubox up myapp.kubox --name demo --ttl 1h
+kubox test load demo --script myapp.kubox/tests/load.js
 kubox down demo
 ```
 
@@ -94,8 +96,9 @@ Release binaries report their version via `kubox --version`; local
 - **A dynamic storage class** if you use `volume` in a slice (kind's default
   `standard` class works out of the box). Without volumes, nothing special is
   needed.
-- **Docker** (or compatible) on the machine running kubox, to build the
-  images your slice references — kubox never builds or pushes.
+- **Docker** (or compatible) on the machine running kubox, if you use
+  `kubox build` to build your slice's image (or build/push images yourself —
+  kubox never runs a registry or a build service).
 - **metrics-server** if you use `scaling` (or want CPU-based HPA tests).
   kind: `kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml`
 
@@ -160,8 +163,9 @@ with `failed quota`.
 data survives pod restarts and re-syncs — use it for databases. The PVC is
 deleted together with the environment.
 
-`toolbox.image` (default `alpine/k8s:1.30.2`) swaps the toolbox pod's image —
-use it to bring extra tools (e.g. kubot) into the environment:
+`toolbox.image` (default `ghcr.io/kubotdev/kubox-toolbox:latest` — kubectl +
+k6 + kubot + shell tools) swaps the toolbox pod's image if you need something
+else:
 
 ### Environments are re-syncable
 
@@ -222,20 +226,32 @@ kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/late
 
 ## Getting images into the environment
 
-kubox deploys the images you reference; it never builds or pushes them.
+Point `app.build.context` in the slice at a Dockerfile directory, and let
+`kubox build` do the round trip:
 
-**Local kind cluster** — build and load:
-
-```sh
-docker build -t payment-service:v1 ./payment-service
-kind load docker-image payment-service:v1 --name <cluster-name>
+```yaml
+app:
+  image: payment-service:v1   # the tag kubox build produces and up deploys
+  build:
+    context: ./payment-service
 ```
 
-**Remote cluster** — push to a registry the cluster can pull from
-(`docker push …`, then reference that tag in the slice).
+```sh
+kubox build myapp.kubox       # docker build → tags app.image
+                              # + kind load, when the context is kind
+kubox up myapp.kubox --name fix-auth --ttl 1h
+```
 
-After changing code: rebuild → load/push → `kubox up` again. The re-sync
-rolls the pods, and your environment runs the new version in seconds.
+On a **remote (non-kind) cluster**, `kubox build` builds the tag but cannot
+hand it to the cluster — push it to a registry the cluster can pull from,
+then `kubox up`.
+
+You can always skip `kubox build` and manage images yourself (`docker
+build`/`kind load docker-image`/`docker push`); it is a convenience, not a
+build service.
+
+After changing code: `kubox build` → `kubox up` again. The re-sync rolls
+the pods, and your environment runs the new version in seconds.
 
 ## Create, test, clean up
 
@@ -455,12 +471,14 @@ timeout if you run load tests through it (k6 runs can exceed the default):
 }
 ```
 
-Tools: `up`, `down`, `exec`, `list`, `status`, `test_load`, `test_drill`.
+Tools: `up`, `build`, `down`, `exec`, `list`, `status`, `test_load`, `test_drill`.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
+| `kubox init <dir>` | Scaffold a slice (`kubox.yaml` + starter k6 test); `--force` to overwrite |
+| `kubox build <slice>` | `docker build` the slice's `app.build.context` as `app.image`; `kind load` when the context is kind (`--no-load` to skip) |
 | `kubox up <slice> --name N --ttl 1h` | Deploy a slice; re-syncs (rolls pods) if the environment exists |
 | `kubox down N` | Delete an environment (waits until it's gone) |
 | `kubox exec N -- <cmd>` | Run a command in the environment's toolbox |
@@ -474,16 +492,17 @@ Tools: `up`, `down`, `exec`, `list`, `status`, `test_load`, `test_drill`.
 ## Roadmap
 
 kubox stays a **lifecycle + guardrails + measurement** layer — it will not
-grow a build system, a registry, or a UI. What's next, roughly:
+grow a build system, a registry, or a UI (`kubox build` is a docker +
+`kind load` convenience, nothing more). What's next, roughly:
 
-- **v0.2** — `kubox init` slice scaffold, `kubox build` (docker + `kind load`
-  convenience), a committed example app, an official toolbox image
-  (`kubotdev/kubox-toolbox`: kubectl + k6 + kubot for in-environment diagnosis)
 - **v0.3** — more drills derived from the slice (`resource-pressure`,
   `scale-under-load`), CI/PR one-shots and a GitHub Action (the `--create
   --delete-after --json` contract already exists)
 
-Already in: the verification envelope (`--report`, `test drill`) and the
+Already in (v0.2): `kubox init`, `kubox build`, the committed example app
+([demo/shop](demo/shop)), and the official toolbox image
+(`ghcr.io/kubotdev/kubox-toolbox`: kubectl + k6 + kubot). Before that (v0.1):
+the verification envelope (`--report`, `test drill`) and the
 `dependency-restart` drill — see
 [docs/json.md](docs/json.md) and [docs/testing.md](docs/testing.md).
 

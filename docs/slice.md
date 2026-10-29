@@ -44,7 +44,9 @@ quotas:
 | Field | Required | Default | Notes |
 |---|---|---|---|
 | `name` | yes | — | environment/service name prefix |
-| `app.image` | yes* | — | *or `app.build` (placeholder for the future `kubox build`) |
+| `app.image` | yes | — | the tag `kubox build` produces and `up` deploys |
+| `app.build.context` | no | — | directory (relative to the slice) with the Dockerfile; enables `kubox build` |
+| `app.build.dockerfile` | no | `Dockerfile` | Dockerfile name inside the context |
 | `app.port` | no | `8080` | container + service port |
 | `app.replicas` | no | `1` | ignored while `scaling` is set (HPA owns it) |
 | `app.env` | no | — | plain env vars |
@@ -55,7 +57,7 @@ quotas:
 | `dependencies[].volume` | no | — | `size` + `path`: a PVC mounted at `path`; survives re-syncs and pod restarts, deleted with the environment |
 | `quotas` | no | cpu `2`, memory `4Gi`, pods `20` | namespace-wide — see below |
 | `networkPolicy.default` | no | `deny-all` | default-deny all ingress/egress except intra-slice traffic + DNS + API server |
-| `toolbox.image` | no | `alpine/k8s:1.30.2` | the toolbox pod's image; swap it to bring extra tools (e.g. kubot) into the environment |
+| `toolbox.image` | no | `ghcr.io/kubotdev/kubox-toolbox:latest` | the toolbox pod's image (kubectl + k6 + kubot + shell tools); swap for your own |
 
 ## Quotas are namespace-wide
 

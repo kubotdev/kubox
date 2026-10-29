@@ -49,5 +49,6 @@ can exceed the default:
 Tools are deterministic wrappers over the same Manager the CLI uses —
 `test_drill` returns the same envelope as `kubox test drill --json`, with
 the same `error`-means-broken-environment semantics. The server's
-instructions tell the agent the standing rules: always TTL, kubox never
-builds or pushes images, diagnose before fixing.
+instructions tell the agent the standing rules: always TTL, `build` is a
+docker + `kind load` convenience (no registry, no build service), diagnose
+before fixing.

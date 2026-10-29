@@ -33,9 +33,11 @@ network policy, TTL, preflight.
 | MCP | `internal/mcp` | generic stdio JSON-RPC server (tools/prompts/resources); no kubox specifics — tools are wired in `cmd/kubox/mcp.go` |
 
 Conventions: mutation only ever targets namespaces labeled
-`kubox.dev/env`; kubox owns lifecycle and evidence, never builds or pushes
-images; tests use fake clients (never a live cluster), with injectable
-seams (`waitFn`, `probeFn`) where a real cluster would otherwise be needed.
+`kubox.dev/env`; kubox owns lifecycle and evidence — `kubox build` is a
+`docker build` + `kind load` passthrough, never a registry or build
+service; tests use fake clients (never a live cluster), with injectable
+seams (`waitFn`, `probeFn`, `runCommand`) where a real cluster would
+otherwise be needed.
 
 ## Lifecycle
 

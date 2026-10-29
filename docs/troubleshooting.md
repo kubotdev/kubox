@@ -2,10 +2,29 @@
 
 ## `ImagePullBackOff` after `up`
 
-The image isn't in the cluster. kubox never builds or pushes — that's
-yours: `docker build`, then `kind load docker-image <img> --name <cluster>`
-for kind, or `docker push` to a registry the cluster can pull from. `up`
-again to re-sync; the pods roll to the new image.
+The image isn't in the cluster. If the slice has `app.build.context`, run
+`kubox build <slice>` — it does `docker build` + `kind load` (kind only).
+Otherwise that step is yours: `docker build`, then `kind load docker-image
+<img> --name <cluster>` for kind, or `docker push` to a registry the cluster
+can pull from. `up` again to re-sync; the pods roll to the new image.
+
+## Disk filling up from `kubox build`
+
+kubox never deletes images — `down` removes the environment (namespace,
+pods, volumes), not images. Rebuilds of the same tag leave the old layers
+dangling in docker and untagged in the kind node. That's docker's job to
+clean, not kubox's:
+
+```sh
+docker image prune        # dangling (<none>) images from rebuilds
+docker system prune       # everything unused: images, containers, networks
+```
+
+Unused images already loaded into a kind node are garbage-collected by the
+kubelet once the node's disk passes ~85% — images a pod uses are never
+touched. To keep churn low: use one stable tag per slice (`app.image:
+shop:v1`) and let rebuilds overwrite it, instead of minting a new tag per
+attempt.
 
 ## Pods Pending / `failed quota`
 
