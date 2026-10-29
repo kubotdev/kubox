@@ -1,0 +1,44 @@
+name: toolbox
+on:
+  push:
+    branches: [main]
+    paths: ["toolbox/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/kubotdev/kubox-toolbox
+          tags: |
+            type=raw,value=latest
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: toolbox
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+      - name: Make package public
+        run: |
+          gh api -X PATCH /orgs/kubotdev/packages/container/kubox-toolbox \
+            -f visibility=public \
+          || echo "::warning::could not set package visibility — set ghcr.io/kubotdev/kubox-toolbox to public manually in package settings"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
