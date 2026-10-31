@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +19,7 @@ import (
 
 const (
 	DrillDependencyRestart = "dependency-restart"
+	DrillScaleLoad         = "scale-under-load"
 	defaultDrillTimeout    = 2 * time.Minute
 	drillPollInterval      = 2 * time.Second
 )
@@ -23,6 +27,7 @@ const (
 type DrillSpec struct {
 	Type       string
 	Dependency string
+	Script     string
 	Timeout    time.Duration
 }
 
@@ -52,8 +57,11 @@ type DrillResult struct {
 
 func (m *Manager) RunDrill(ctx context.Context, envName string, spec DrillSpec) (*DrillResult, error) {
 	spec.normalize()
-	if spec.Type != DrillDependencyRestart {
-		return nil, fmt.Errorf("unknown drill type %q (supported: %s)", spec.Type, DrillDependencyRestart)
+	switch spec.Type {
+	case DrillDependencyRestart, DrillScaleLoad:
+	default:
+		return nil, fmt.Errorf("unknown drill type %q (supported: %s, %s)",
+			spec.Type, DrillDependencyRestart, DrillScaleLoad)
 	}
 
 	health, err := m.CheckEnv(ctx, envName)
@@ -64,26 +72,70 @@ func (m *Manager) RunDrill(ctx context.Context, envName string, spec DrillSpec) 
 		return &DrillResult{Environment: *health}, nil
 	}
 
-	if spec.Dependency == "" {
-		return nil, fmt.Errorf("%s requires a target dependency (--dependency)", spec.Type)
-	}
-	if spec.Dependency == envName {
-		return nil, fmt.Errorf(
-			"target %q is the app itself — restart it with `kubox exec %s -- kubectl delete pod -l app=%s`",
-			spec.Dependency, envName, envName)
-	}
-
 	ns := slice.EnvNamespace(envName)
-	svc, err := m.Client.CoreV1().Services(ns).Get(ctx, spec.Dependency, metav1.GetOptions{})
-	if err != nil || svc.Labels[LabelEnv] != envName {
-		return nil, fmt.Errorf("dependency %q is not a service of environment %q", spec.Dependency, envName)
-	}
-
-	check, err := m.runDependencyRestart(ctx, envName, ns, spec)
-	if err != nil {
-		return nil, err
+	var check Check
+	switch spec.Type {
+	case DrillDependencyRestart:
+		if spec.Dependency == "" {
+			return nil, fmt.Errorf("%s requires a target dependency (--dependency)", spec.Type)
+		}
+		if spec.Dependency == envName {
+			return nil, fmt.Errorf(
+				"target %q is the app itself — restart it with `kubox exec %s -- kubectl delete pod -l app=%s`",
+				spec.Dependency, envName, envName)
+		}
+		svc, err := m.Client.CoreV1().Services(ns).Get(ctx, spec.Dependency, metav1.GetOptions{})
+		if err != nil || svc.Labels[LabelEnv] != envName {
+			return nil, fmt.Errorf("dependency %q is not a service of environment %q", spec.Dependency, envName)
+		}
+		check, err = m.runDependencyRestart(ctx, envName, ns, spec)
+		if err != nil {
+			return nil, err
+		}
+	case DrillScaleLoad:
+		if spec.Script == "" {
+			return nil, fmt.Errorf("%s requires a k6 script (--script)", spec.Type)
+		}
+		check, err = m.runScaleUnderLoad(ctx, envName, ns, spec)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &DrillResult{Check: check, Environment: *health}, nil
+}
+
+type phaseRecorder struct {
+	phases []DrillPhase
+	ok     bool
+}
+
+func newPhaseRecorder() *phaseRecorder { return &phaseRecorder{ok: true} }
+
+func (r *phaseRecorder) record(ctx context.Context, name string, fn func() (string, error)) {
+	if !r.ok {
+		r.phases = append(r.phases, DrillPhase{Name: name, Status: "skipped"})
+		return
+	}
+	t0 := time.Now()
+	msg, err := fn()
+	ph := DrillPhase{
+		Name:       name,
+		Status:     "pass",
+		DurationMS: time.Since(t0).Milliseconds(),
+		Message:    msg,
+	}
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			ph.Status = "timeout"
+		} else {
+			ph.Status = "failed"
+		}
+		if msg == "" {
+			ph.Message = err.Error()
+		}
+		r.ok = false
+	}
+	r.phases = append(r.phases, ph)
 }
 
 func (m *Manager) runDependencyRestart(ctx context.Context, envName, ns string, spec DrillSpec) (Check, error) {
@@ -102,65 +154,45 @@ func (m *Manager) runDependencyRestart(ctx context.Context, envName, ns string, 
 	}
 
 	detail := DrillDetail{Target: target, Fault: "delete-pods"}
-	var phases []DrillPhase
-	ok := true
-	record := func(name string, fn func() (string, error)) {
-		if !ok {
-			phases = append(phases, DrillPhase{Name: name, Status: "skipped"})
-			return
-		}
-		t0 := time.Now()
-		msg, err := fn()
-		ph := DrillPhase{
-			Name:       name,
-			Status:     "pass",
-			DurationMS: time.Since(t0).Milliseconds(),
-			Message:    msg,
-		}
-		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
-				ph.Status = "timeout"
-			} else {
-				ph.Status = "failed"
-			}
-			if msg == "" {
-				ph.Message = err.Error()
-			}
-			ok = false
-		}
-		phases = append(phases, ph)
-	}
+	rec := newPhaseRecorder()
 
-	record("inject", func() (string, error) { return m.injectDepRestart(ctx, ns, target) })
-	record("dependency_ready", func() (string, error) {
+	rec.record(ctx, "inject", func() (string, error) { return m.injectDepRestart(ctx, ns, target) })
+	rec.record(ctx, "dependency_ready", func() (string, error) {
 		return m.waitDepReady(ctx, ns, target, snapshot, spec.Timeout)
 	})
-	record("app_recovered", func() (string, error) {
+	rec.record(ctx, "app_recovered", func() (string, error) {
 		return m.waitAppHealthy(ctx, envName, ns, appPort, healthPath, spec.Timeout)
 	})
-	record("app_replicas_ready", func() (string, error) {
+	rec.record(ctx, "app_replicas_ready", func() (string, error) {
 		return m.waitAppReplicas(ctx, ns, envName, spec.Timeout)
 	})
-	record("settle", func() (string, error) {
+	rec.record(ctx, "settle", func() (string, error) {
 		return m.settle(ctx, envName, ns, target, appPort, healthPath, spec.Timeout)
 	})
 
-	detail.Phases = phases
+	return buildDrillCheck(CheckTypeDrillDepRestart, detail, rec, start,
+		func(phases []DrillPhase) Finding { return passFinding(phases, spec.Timeout) },
+		func(phases []DrillPhase) Finding { return failFinding(phases, target, spec.Timeout) }), nil
+}
+
+func buildDrillCheck(checkType string, detail DrillDetail, rec *phaseRecorder, start time.Time,
+	pass, fail func([]DrillPhase) Finding) Check {
+	detail.Phases = rec.phases
 	check := Check{
-		Type:       CheckTypeDrillDepRestart,
+		Type:       checkType,
 		Status:     CheckPass,
 		DurationMS: time.Since(start).Milliseconds(),
 	}
 	if b, err := json.Marshal(detail); err == nil {
 		check.Detail = b
 	}
-	if ok {
-		check.Findings = append(check.Findings, passFinding(phases, spec.Timeout))
+	if rec.ok {
+		check.Findings = append(check.Findings, pass(rec.phases))
 	} else {
 		check.Status = CheckFail
-		check.Findings = append(check.Findings, failFinding(phases, target, spec.Timeout))
+		check.Findings = append(check.Findings, fail(rec.phases))
 	}
-	return check, nil
+	return check
 }
 
 func passFinding(phases []DrillPhase, timeout time.Duration) Finding {
@@ -232,6 +264,278 @@ func phaseDuration(phases []DrillPhase, name string) time.Duration {
 		}
 	}
 	return 0
+}
+
+func phaseMessage(phases []DrillPhase, name string) string {
+	for _, ph := range phases {
+		if ph.Name == name {
+			return ph.Message
+		}
+	}
+	return ""
+}
+
+// scale-under-load
+
+func (m *Manager) runScaleUnderLoad(ctx context.Context, envName, ns string, spec DrillSpec) (Check, error) {
+	start := time.Now()
+	hpa, err := m.Client.AutoscalingV2().HorizontalPodAutoscalers(ns).Get(ctx, envName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return Check{}, fmt.Errorf("environment %q has no HPA — add app.scaling to kubox.yaml and run `kubox up` again", envName)
+	}
+	if err != nil {
+		return Check{}, err
+	}
+	dep, err := m.Client.AppsV1().Deployments(ns).Get(ctx, envName, metav1.GetOptions{})
+	if err != nil {
+		return Check{}, fmt.Errorf("app deployment: %w", err)
+	}
+	baseline := int32(1)
+	if dep.Spec.Replicas != nil {
+		baseline = *dep.Spec.Replicas
+	}
+	if baseline >= hpa.Spec.MaxReplicas {
+		return Check{}, fmt.Errorf("app already at scaling.max (%d) — no headroom to scale up; raise app.scaling.max", hpa.Spec.MaxReplicas)
+	}
+
+	appPort, err := m.appPort(ctx, ns, envName)
+	if err != nil {
+		return Check{}, err
+	}
+	healthPath := m.appHealthPath(ctx, ns)
+
+	detail := DrillDetail{Target: envName, Fault: "hpa-scale-under-load"}
+	rec := newPhaseRecorder()
+	run := &loadRun{ch: make(chan loadOutcome, 1)}
+
+	rec.record(ctx, "baseline", func() (string, error) {
+		return m.waitScalingActive(ctx, ns, envName, baseline, hpa.Spec.MaxReplicas, spec.Timeout)
+	})
+	rec.record(ctx, "scale_up", func() (string, error) {
+		go func() {
+			res, err := m.runLoad(ctx, envName, spec.Script)
+			run.ch <- loadOutcome{res, err}
+		}()
+		return m.waitScaledUp(ctx, ns, envName, baseline, spec.Timeout, run)
+	})
+	rec.record(ctx, "load_slo", func() (string, error) {
+		return awaitLoadSLO(ctx, run, spec.Timeout)
+	})
+	rec.record(ctx, "settle", func() (string, error) {
+		return m.settle(ctx, envName, ns, envName, appPort, healthPath, spec.Timeout)
+	})
+
+	return buildDrillCheck(CheckTypeDrillScaleLoad, detail, rec, start,
+		func(phases []DrillPhase) Finding { return scalePassFinding(phases, spec.Timeout) },
+		scaleFailFinding), nil
+}
+
+func (m *Manager) runLoad(ctx context.Context, envName, script string) (*K6Result, error) {
+	if m.loadFn != nil {
+		return m.loadFn(ctx, envName, script)
+	}
+	return m.RunLoadTest(ctx, envName, script)
+}
+
+func (m *Manager) waitScalingActive(ctx context.Context, ns, appName string, baseline, max int32, timeout time.Duration) (string, error) {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	for {
+		hpa, err := m.Client.AutoscalingV2().HorizontalPodAutoscalers(ns).Get(pctx, appName, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		if cond := hpaCondition(hpa, autoscalingv2.ScalingActive); cond != nil && cond.Status == corev1.ConditionTrue {
+			return fmt.Sprintf("scaling active at %d replicas (max %d)", baseline, max), nil
+		}
+		select {
+		case <-pctx.Done():
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return scalingActiveHint(hpa, timeout), context.DeadlineExceeded
+		case <-time.After(drillPollInterval):
+		}
+	}
+}
+
+func scalingActiveHint(hpa *autoscalingv2.HorizontalPodAutoscaler, timeout time.Duration) string {
+	msg := fmt.Sprintf("HPA not active within %s — is metrics-server installed? (kubectl top nodes must return numbers)", timeout)
+	if cond := hpaCondition(hpa, autoscalingv2.ScalingActive); cond != nil && cond.Message != "" {
+		msg = fmt.Sprintf("HPA ScalingActive=False (%s: %s) — is metrics-server installed? (kubectl top nodes must return numbers)",
+			cond.Reason, cond.Message)
+	}
+	return msg
+}
+
+func hpaCondition(hpa *autoscalingv2.HorizontalPodAutoscaler, condType autoscalingv2.HorizontalPodAutoscalerConditionType) *autoscalingv2.HorizontalPodAutoscalerCondition {
+	for i := range hpa.Status.Conditions {
+		if hpa.Status.Conditions[i].Type == condType {
+			return &hpa.Status.Conditions[i]
+		}
+	}
+	return nil
+}
+
+func (m *Manager) waitScaledUp(ctx context.Context, ns, appName string, baseline int32, timeout time.Duration, run *loadRun) (string, error) {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	t0 := time.Now()
+	for {
+		dep, err := m.Client.AppsV1().Deployments(ns).Get(pctx, appName, metav1.GetOptions{})
+		if err != nil {
+			return "", err
+		}
+		cur := baseline
+		if dep.Spec.Replicas != nil {
+			cur = *dep.Spec.Replicas
+		}
+		if cur > baseline {
+			return fmt.Sprintf("scaled %d → %d replicas under load after %s",
+				baseline, cur, time.Since(t0).Round(100*time.Millisecond)), nil
+		}
+		if lo := run.poll(); lo != nil && lo.err != nil {
+			return fmt.Sprintf("load run failed before scale-up: %v", lo.err), lo.err
+		}
+		select {
+		case <-pctx.Done():
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if lo := run.poll(); lo != nil && lo.err == nil {
+				return fmt.Sprintf("load finished but replicas stayed at %d — was it heavy/long enough to breach cpuPercent?", baseline),
+					context.DeadlineExceeded
+			}
+			return fmt.Sprintf("replicas did not exceed %d within %s", baseline, timeout), context.DeadlineExceeded
+		case <-time.After(drillPollInterval):
+		}
+	}
+}
+
+type loadOutcome struct {
+	res *K6Result
+	err error
+}
+
+type loadRun struct {
+	ch  chan loadOutcome
+	out *loadOutcome
+}
+
+func (r *loadRun) poll() *loadOutcome {
+	if r.out != nil {
+		return r.out
+	}
+	select {
+	case o := <-r.ch:
+		r.out = &o
+		return &o
+	default:
+		return nil
+	}
+}
+
+func (r *loadRun) wait(ctx context.Context) (*loadOutcome, error) {
+	if r.out != nil {
+		return r.out, nil
+	}
+	select {
+	case o := <-r.ch:
+		r.out = &o
+		return &o, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func awaitLoadSLO(ctx context.Context, run *loadRun, timeout time.Duration) (string, error) {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	lo, err := run.wait(pctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return fmt.Sprintf("k6 run did not finish within %s", timeout), context.DeadlineExceeded
+	}
+	if lo.err != nil {
+		return fmt.Sprintf("k6 run failed: %v", lo.err), lo.err
+	}
+	res := lo.res
+	if res.Status != "pass" {
+		msg := failedThresholds(res)
+		return msg, errors.New(msg)
+	}
+	return fmt.Sprintf("SLO met: %d requests, p95 %.1fms, rps %.1f",
+		res.Summary.Requests, res.Summary.P95, res.Summary.RPS), nil
+}
+
+func failedThresholds(res *K6Result) string {
+	names := make([]string, 0, len(res.Thresholds))
+	for name := range res.Thresholds {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var crossed []string
+	for _, name := range names {
+		if t := res.Thresholds[name]; !t.Pass {
+			crossed = append(crossed, fmt.Sprintf("%s = %g", name, t.Value))
+		}
+	}
+	if len(crossed) == 0 {
+		return "k6 exited nonzero but no thresholds crossed (script error?)"
+	}
+	return "threshold not met: " + strings.Join(crossed, ", ")
+}
+
+func scalePassFinding(phases []DrillPhase, timeout time.Duration) Finding {
+	up := phaseDuration(phases, "scale_up")
+	return Finding{
+		Metric:   "scale_up_seconds",
+		Expected: fmt.Sprintf("<%s", timeout),
+		Actual:   fmt.Sprintf("%.1f", up.Seconds()),
+		Message: fmt.Sprintf("HPA scaled up in %s while k6 held load; thresholds held (%s)",
+			up.Round(100*time.Millisecond), phaseMessage(phases, "load_slo")),
+	}
+}
+
+func scaleFailFinding(phases []DrillPhase) Finding {
+	for _, ph := range phases {
+		if ph.Status == "pass" || ph.Status == "skipped" {
+			continue
+		}
+		switch ph.Name {
+		case "baseline":
+			return Finding{
+				Metric:   "scaling_active",
+				Expected: "HPA ScalingActive=True",
+				Actual:   ph.Status,
+				Message:  ph.Message,
+			}
+		case "scale_up":
+			return Finding{
+				Metric:   "replicas",
+				Expected: "replicas exceed the baseline under load",
+				Actual:   ph.Message,
+				Message:  fmt.Sprintf("app did not scale up: %s", ph.Message),
+			}
+		case "load_slo":
+			return Finding{
+				Metric:   "slo",
+				Expected: "k6 thresholds pass",
+				Actual:   ph.Message,
+				Message:  fmt.Sprintf("load SLO not met: %s", ph.Message),
+			}
+		case "settle":
+			return Finding{
+				Metric:   "steady_state",
+				Expected: "app healthy after the load",
+				Actual:   ph.Message,
+				Message:  fmt.Sprintf("app unhealthy after the load: %s", ph.Message),
+			}
+		}
+	}
+	return Finding{Message: "drill failed"}
 }
 
 // fault injection

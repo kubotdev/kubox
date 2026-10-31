@@ -47,6 +47,10 @@ type Manager struct {
 	// probeFn checks that the app answers (HTTP when a healthcheck path is
 	// known, TCP otherwise); overridable in tests.
 	probeFn func(ctx context.Context, envName, host string, port int32, healthPath string) error
+	// loadFn runs a k6 load test; overridable in tests (scale-under-load drill).
+	loadFn func(ctx context.Context, envName, scriptPath string) (*K6Result, error)
+	// execFn runs a command in the environment's toolbox.
+	execFn func(ctx context.Context, envName string, command []string) (*ExecResult, error)
 }
 
 func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) *Manager {
@@ -56,6 +60,8 @@ func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) 
 	m := &Manager{Client: cs, restCfg: cfg, toolboxImage: toolboxImage}
 	m.waitFn = m.waitDeployments
 	m.probeFn = m.defaultProbe
+	m.loadFn = m.RunLoadTest
+	m.execFn = m.ExecToolbox
 	return m
 }
 

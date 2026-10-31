@@ -33,6 +33,13 @@ func (m *Manager) ExecToolbox(ctx context.Context, envName string, command []str
 	return m.execInPod(ctx, ns, toolboxName, toolboxName, command)
 }
 
+func (m *Manager) runExec(ctx context.Context, envName string, command []string) (*ExecResult, error) {
+	if m.execFn != nil {
+		return m.execFn(ctx, envName, command)
+	}
+	return m.ExecToolbox(ctx, envName, command)
+}
+
 func (m *Manager) ExecOnce(ctx context.Context, envName, image string, command []string, mounts []Mount) (*ExecResult, error) {
 	ns := slice.EnvNamespace(envName)
 	name := fmt.Sprintf("kubox-run-%d", time.Now().UnixNano()%1e9)

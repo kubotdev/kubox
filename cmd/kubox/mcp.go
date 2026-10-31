@@ -36,7 +36,8 @@ func newMCPCmd() *cobra.Command {
 					"app image (docker + `kind load` when the context is kind), " +
 					"`test_load` to run a k6 load " +
 					"test, `test_drill` to run failure drills (restart a " +
-					"dependency and verify the app recovers), and `down` to " +
+					"dependency and verify the app recovers, or verify the HPA " +
+					"scales the app under load), and `down` to " +
 					"delete it. Always set a TTL. Environments " +
 					"are namespace-scoped and network-isolated; they cannot touch " +
 					"production. `build` handles the docker + `kind load` step " +
@@ -187,10 +188,14 @@ func kuboxTools() []mcp.Tool {
 		},
 		{
 			Name: "test_drill",
-			Description: "Run a failure drill against an environment (restart a " +
-				"dependency and verify the app recovers). Preflights the " +
-				"environment first: if it is unhealthy no fault is injected " +
-				"and the report status is \"error\", not \"fail\". Returns a " +
+			Description: "Run a failure drill against an environment: restart a " +
+				"dependency and verify the app recovers, or hold the app under " +
+				"k6 load and verify the HPA scales it up (type " +
+				"'scale-under-load', needs app.scaling + metrics-server + a " +
+				"script). Preflights the environment first: if it is unhealthy " +
+				"no fault is injected and the report status is \"error\", not " +
+				"\"fail\". With kubot=true, a non-gating kubot diagnosis check " +
+				"is appended (only critical findings fail it). Returns a " +
 				"verification report: status pass|fail|error, environment " +
 				"health, and per-phase evidence (recovery timings).",
 			InputSchema: map[string]any{
@@ -203,7 +208,7 @@ func kuboxTools() []mcp.Tool {
 					},
 					"type": map[string]any{
 						"type":        "string",
-						"description": "Drill type. Currently only 'dependency-restart' (default).",
+						"description": "Drill type: 'dependency-restart' (default) or 'scale-under-load'.",
 					},
 					"dependency": map[string]any{
 						"type":        "string",
@@ -212,6 +217,14 @@ func kuboxTools() []mcp.Tool {
 					"all": map[string]any{
 						"type":        "boolean",
 						"description": "Run the drill against every dependency in the environment.",
+					},
+					"script": map[string]any{
+						"type":        "string",
+						"description": "k6 script path (.js) — required for type 'scale-under-load'.",
+					},
+					"kubot": map[string]any{
+						"type":        "boolean",
+						"description": "Append a non-gating kubot diagnosis check (kubot inspect --json in the toolbox).",
 					},
 					"timeout": map[string]any{
 						"type":        "string",
@@ -370,6 +383,8 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		Type       string `json:"type"`
 		Dependency string `json:"dependency"`
 		All        bool   `json:"all"`
+		Script     string `json:"script"`
+		Kubot      bool   `json:"kubot"`
 		Timeout    string `json:"timeout"`
 	}
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -379,11 +394,26 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 	if drillType == "" {
 		drillType = env.DrillDependencyRestart
 	}
-	if args.All && args.Dependency != "" {
-		return "", fmt.Errorf("'dependency' and 'all' are mutually exclusive")
-	}
-	if !args.All && args.Dependency == "" {
-		return "", fmt.Errorf("either 'dependency' or 'all' is required")
+	var resolvedScript string
+	switch drillType {
+	case env.DrillDependencyRestart:
+		if args.All && args.Dependency != "" {
+			return "", fmt.Errorf("'dependency' and 'all' are mutually exclusive")
+		}
+		if !args.All && args.Dependency == "" {
+			return "", fmt.Errorf("either 'dependency' or 'all' is required")
+		}
+	case env.DrillScaleLoad:
+		if args.Script == "" {
+			return "", fmt.Errorf("scale-under-load requires 'script'")
+		}
+		if args.All || args.Dependency != "" {
+			return "", fmt.Errorf("scale-under-load does not take 'dependency'/'all'")
+		}
+		resolvedScript = env.ResolveScriptPath("", args.Script)
+	default:
+		return "", fmt.Errorf("unknown drill type %q (supported: %s, %s)",
+			drillType, env.DrillDependencyRestart, env.DrillScaleLoad)
 	}
 	var timeoutDur time.Duration
 	if args.Timeout != "" {
@@ -398,20 +428,23 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	targets := []string{args.Dependency}
-	if args.All {
-		e, err := m.Get(ctx, args.Name)
-		if err != nil {
-			return "", err
-		}
-		targets = targets[:0]
-		for _, svc := range e.Services {
-			if svc != args.Name {
-				targets = append(targets, svc)
+	targets := []string{""} // scale-under-load runs once, no dependency
+	if drillType == env.DrillDependencyRestart {
+		targets = []string{args.Dependency}
+		if args.All {
+			e, err := m.Get(ctx, args.Name)
+			if err != nil {
+				return "", err
 			}
-		}
-		if len(targets) == 0 {
-			return "", fmt.Errorf("environment %q has no dependencies to drill", args.Name)
+			targets = targets[:0]
+			for _, svc := range e.Services {
+				if svc != args.Name {
+					targets = append(targets, svc)
+				}
+			}
+			if len(targets) == 0 {
+				return "", fmt.Errorf("environment %q has no dependencies to drill", args.Name)
+			}
 		}
 	}
 
@@ -421,6 +454,7 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		res, err := m.RunDrill(ctx, args.Name, env.DrillSpec{
 			Type:       drillType,
 			Dependency: target,
+			Script:     resolvedScript,
 			Timeout:    timeoutDur,
 		})
 		if err != nil {
@@ -431,6 +465,9 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 			break
 		}
 		checks = append(checks, res.Check)
+	}
+	if args.Kubot && health.Healthy {
+		checks = append(checks, m.RunKubotDiagnosis(ctx, args.Name))
 	}
 	return marshalJSON(env.NewReport(health, checks...))
 }

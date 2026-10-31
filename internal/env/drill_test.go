@@ -7,10 +7,14 @@ import (
 	"testing"
 	"time"
 
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+
+	"github.com/kubotdev/kubox/internal/slice"
 )
 
 // deleteAndRecreateReactor simulates the Deployment controller: when the
@@ -217,5 +221,225 @@ func TestRunDrillAppNeverRecovers(t *testing.T) {
 	f := res.Check.Findings[0]
 	if f.Metric != "app_recovery_seconds" || !strings.Contains(f.Message, "never recovered") {
 		t.Errorf("finding = %+v, want app-side reconnect diagnosis", f)
+	}
+}
+
+// scale-under-load
+
+func scaleEnvObjects(envName string) []runtime.Object {
+	return append(healthyEnvObjects(envName),
+		componentPod(envName, envName, envName+"-1", "uid-app"),
+	)
+}
+
+func scaleHPA(envName string, max int32, active bool) *autoscalingv2.HorizontalPodAutoscaler {
+	min := int32(1)
+	hpa := &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      envName,
+			Namespace: slice.EnvNamespace(envName),
+			Labels:    map[string]string{LabelEnv: envName},
+		},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{
+				APIVersion: "apps/v1", Kind: "Deployment", Name: envName,
+			},
+			MinReplicas: &min,
+			MaxReplicas: max,
+		},
+	}
+	cond := autoscalingv2.HorizontalPodAutoscalerCondition{Type: autoscalingv2.ScalingActive}
+	if active {
+		cond.Status = corev1.ConditionTrue
+		cond.Reason = "ValidMetricsFound"
+		cond.Message = "the HPA was able to successfully calculate a replica count from cpu utilization"
+	} else {
+		cond.Status = corev1.ConditionFalse
+		cond.Reason = "FailedGetResourceMetric"
+		cond.Message = "the HPA was unable to compute the replica count: failed to get cpu utilization"
+	}
+	hpa.Status.Conditions = []autoscalingv2.HorizontalPodAutoscalerCondition{cond}
+	return hpa
+}
+
+// scaleDeployment sets the app deployment's replicas, standing in for the
+// HPA controller reacting to load.
+func scaleDeployment(t *testing.T, cs *fake.Clientset, envName string, replicas int32) {
+	t.Helper()
+	ns := slice.EnvNamespace(envName)
+	d, err := cs.AppsV1().Deployments(ns).Get(context.Background(), envName, metav1.GetOptions{})
+	if err != nil {
+		t.Errorf("get deployment: %v", err)
+		return
+	}
+	d.Spec.Replicas = &replicas
+	if _, err := cs.AppsV1().Deployments(ns).Update(context.Background(), d, metav1.UpdateOptions{}); err != nil {
+		t.Errorf("update deployment: %v", err)
+	}
+}
+
+func TestRunDrillScaleUnderLoadRequiresScript(t *testing.T) {
+	objs := append(scaleEnvObjects("shop"), scaleHPA("shop", 3, true))
+	m := NewManager(fake.NewSimpleClientset(objs...), nil, "")
+	_, err := m.RunDrill(context.Background(), "shop", DrillSpec{Type: DrillScaleLoad})
+	if err == nil || !strings.Contains(err.Error(), "--script") {
+		t.Errorf("err = %v, want --script hint", err)
+	}
+}
+
+func TestRunDrillScaleUnderLoadRequiresHPA(t *testing.T) {
+	m := NewManager(fake.NewSimpleClientset(healthyEnvObjects("shop")...), nil, "")
+	_, err := m.RunDrill(context.Background(), "shop", DrillSpec{Type: DrillScaleLoad, Script: "load.js"})
+	if err == nil || !strings.Contains(err.Error(), "app.scaling") {
+		t.Errorf("err = %v, want app.scaling hint", err)
+	}
+}
+
+func TestRunDrillScaleUnderLoadNoHeadroom(t *testing.T) {
+	objs := append(scaleEnvObjects("shop"), scaleHPA("shop", 1, true))
+	m := NewManager(fake.NewSimpleClientset(objs...), nil, "")
+	_, err := m.RunDrill(context.Background(), "shop", DrillSpec{Type: DrillScaleLoad, Script: "load.js"})
+	if err == nil || !strings.Contains(err.Error(), "scaling.max") {
+		t.Errorf("err = %v, want scaling.max headroom hint", err)
+	}
+}
+
+func TestRunDrillScaleUnderLoad(t *testing.T) {
+	objs := append(scaleEnvObjects("shop"), scaleHPA("shop", 3, true))
+	cs := fake.NewSimpleClientset(objs...)
+	m := NewManager(cs, nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+	m.loadFn = func(ctx context.Context, envName, script string) (*K6Result, error) {
+		// The HPA reacts while the load runs.
+		scaleDeployment(t, cs, envName, 2)
+		return &K6Result{Status: "pass", Summary: K6Summary{Requests: 1500, RPS: 90, P95: 4.9}}, nil
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillScaleLoad, Script: "load.js", Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckPass {
+		t.Errorf("status = %s, want pass (findings: %+v)", res.Check.Status, res.Check.Findings)
+	}
+	if res.Check.Type != CheckTypeDrillScaleLoad {
+		t.Errorf("type = %q, want %q", res.Check.Type, CheckTypeDrillScaleLoad)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if d.Fault != "hpa-scale-under-load" || d.Target != "shop" {
+		t.Errorf("detail = %+v, want target shop / hpa-scale-under-load", d)
+	}
+	for _, name := range []string{"baseline", "scale_up", "load_slo", "settle"} {
+		if ph := phaseByName(t, d.Phases, name); ph.Status != "pass" {
+			t.Errorf("phase %s = %s (%s), want pass", name, ph.Status, ph.Message)
+		}
+	}
+	if len(res.Check.Findings) != 1 || res.Check.Findings[0].Metric != "scale_up_seconds" {
+		t.Errorf("findings = %+v, want one scale_up_seconds finding", res.Check.Findings)
+	}
+}
+
+func TestRunDrillScaleUnderLoadNoMetrics(t *testing.T) {
+	objs := append(scaleEnvObjects("shop"), scaleHPA("shop", 3, false))
+	m := NewManager(fake.NewSimpleClientset(objs...), nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+	loaded := false
+	m.loadFn = func(context.Context, string, string) (*K6Result, error) {
+		loaded = true
+		return &K6Result{Status: "pass"}, nil
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillScaleLoad, Script: "load.js", Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckFail {
+		t.Errorf("status = %s, want fail", res.Check.Status)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if ph := phaseByName(t, d.Phases, "baseline"); ph.Status != "timeout" {
+		t.Errorf("baseline = %s, want timeout", ph.Status)
+	}
+	for _, name := range []string{"scale_up", "load_slo", "settle"} {
+		if ph := phaseByName(t, d.Phases, name); ph.Status != "skipped" {
+			t.Errorf("phase %s = %s, want skipped after a failed baseline", name, ph.Status)
+		}
+	}
+	if loaded {
+		t.Error("load ran despite a failed baseline")
+	}
+	f := res.Check.Findings[0]
+	if f.Metric != "scaling_active" || !strings.Contains(f.Message, "metrics-server") {
+		t.Errorf("finding = %+v, want metrics-server hint", f)
+	}
+}
+
+func TestRunDrillScaleUnderLoadSLOFails(t *testing.T) {
+	objs := append(scaleEnvObjects("shop"), scaleHPA("shop", 3, true))
+	cs := fake.NewSimpleClientset(objs...)
+	m := NewManager(cs, nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+	m.loadFn = func(ctx context.Context, envName, script string) (*K6Result, error) {
+		// Scales up fine — but the agent's SLO misses.
+		scaleDeployment(t, cs, envName, 2)
+		return &K6Result{
+			Status:     "fail",
+			Thresholds: map[string]K6Check{"http_req_duration_p95_lt_200": {Value: 347, Pass: false}},
+		}, nil
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillScaleLoad, Script: "load.js", Timeout: 3 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckFail {
+		t.Errorf("status = %s, want fail", res.Check.Status)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if ph := phaseByName(t, d.Phases, "scale_up"); ph.Status != "pass" {
+		t.Errorf("scale_up = %s (%s), want pass — only the SLO failed", ph.Status, ph.Message)
+	}
+	if ph := phaseByName(t, d.Phases, "load_slo"); ph.Status != "failed" {
+		t.Errorf("load_slo = %s, want failed", ph.Status)
+	}
+	f := res.Check.Findings[0]
+	if f.Metric != "slo" || !strings.Contains(f.Message, "threshold not met") {
+		t.Errorf("finding = %+v, want SLO threshold diagnosis", f)
+	}
+}
+
+func TestRunDrillScaleUnderLoadNoScaleUp(t *testing.T) {
+	objs := append(scaleEnvObjects("shop"), scaleHPA("shop", 3, true))
+	m := NewManager(fake.NewSimpleClientset(objs...), nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+	m.loadFn = func(context.Context, string, string) (*K6Result, error) {
+		return &K6Result{Status: "pass", Summary: K6Summary{Requests: 100}}, nil
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillScaleLoad, Script: "load.js", Timeout: time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckFail {
+		t.Errorf("status = %s, want fail", res.Check.Status)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if ph := phaseByName(t, d.Phases, "scale_up"); ph.Status != "timeout" {
+		t.Errorf("scale_up = %s (%s), want timeout", ph.Status, ph.Message)
+	}
+	if ph := phaseByName(t, d.Phases, "load_slo"); ph.Status != "skipped" {
+		t.Errorf("load_slo = %s, want skipped", ph.Status)
+	}
+	f := res.Check.Findings[0]
+	if f.Metric != "replicas" || !strings.Contains(f.Message, "replicas") {
+		t.Errorf("finding = %+v, want scale-up diagnosis", f)
 	}
 }

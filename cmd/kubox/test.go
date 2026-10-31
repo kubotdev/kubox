@@ -46,6 +46,7 @@ func newTestLoadCmd() *cobra.Command {
 	var ttl string
 	var asJSON bool
 	var report bool
+	var kubot bool
 
 	cmd := &cobra.Command{
 		Use:   "load [env-name] --script <file>",
@@ -76,6 +77,9 @@ func newTestLoadCmd() *cobra.Command {
 			}
 			if script == "" {
 				return usageErrf("test load requires --script <file>")
+			}
+			if kubot && !report {
+				return usageErrf("--kubot requires --report")
 			}
 
 			ttlDur, err := slice.ParseTTL(ttl)
@@ -141,7 +145,11 @@ func newTestLoadCmd() *cobra.Command {
 			}
 
 			if report {
-				r := env.NewReport(*health, env.LoadCheck(result, time.Since(start)))
+				checks := []env.Check{env.LoadCheck(result, time.Since(start))}
+				if kubot {
+					checks = append(checks, m.RunKubotDiagnosis(ctx, envName))
+				}
+				r := env.NewReport(*health, checks...)
 				printReport(cmd, r, asJSON)
 				if r.Status != env.ReportPass {
 					return exitError{exitFailure}
@@ -169,6 +177,7 @@ func newTestLoadCmd() *cobra.Command {
 	cmd.Flags().StringVar(&ttl, "ttl", "1h", "TTL for the environment when using --create")
 	cmd.Flags().BoolVar(&asJSON, "json", false, "output structured JSON instead of human-readable summary")
 	cmd.Flags().BoolVar(&report, "report", false, "output the verification-contract envelope (environment health + findings) instead of the raw k6 result")
+	cmd.Flags().BoolVar(&kubot, "kubot", false, "with --report: append a non-gating kubot diagnosis check (runs `kubot inspect --json` in the toolbox)")
 	return cmd
 }
 
@@ -206,7 +215,9 @@ func newTestDrillCmd() *cobra.Command {
 	var envName string
 	var drillType string
 	var dependency string
+	var script string
 	var all bool
+	var kubot bool
 	var timeoutDur time.Duration
 	var sliceDir string
 	var ttl string
@@ -218,14 +229,21 @@ func newTestDrillCmd() *cobra.Command {
 		Use:   "drill [env-name]",
 		Short: "Run a failure drill against an environment",
 		Long: "Runs a standardized failure experiment and returns structured evidence.\n\n" +
-			"Currently supported drill:\n\n" +
+			"Currently supported drills:\n\n" +
 			"  dependency-restart  Delete a dependency's pods and verify the app\n" +
 			"                      recovers: the dependency comes back Ready, the app\n" +
 			"                      answers its health probe again, and replicas return\n" +
 			"                      to full capacity. Passes with per-phase timings;\n" +
 			"                      fails with a diagnosis of where recovery broke.\n\n" +
+			"  scale-under-load    Hold the app under k6 load (--script) and verify\n" +
+			"                      the HPA scales it up while thresholds hold. Requires\n" +
+			"                      app.scaling in the slice and metrics-server in the\n" +
+			"                      cluster. Scale-down is not asserted (HPA stabilization\n" +
+			"                      defaults to 5 minutes).\n\n" +
 			"The environment is preflighted first: if it is unhealthy, no fault is\n" +
 			"injected and the report says \"error\" (exit 3) — never \"fail\".\n\n" +
+			"With --kubot, `kubot inspect --json` runs in the toolbox afterwards and a\n" +
+			"non-gating diagnosis check is appended (only critical findings fail it).\n\n" +
 			"Output is always the verification-contract envelope (--json for\n" +
 			"machines): status pass | fail | error, environment health, and\n" +
 			"per-phase evidence.",
@@ -240,11 +258,26 @@ func newTestDrillCmd() *cobra.Command {
 			if drillType == "" {
 				drillType = env.DrillDependencyRestart
 			}
-			if all && dependency != "" {
-				return usageErrf("--dependency and --all are mutually exclusive")
-			}
-			if !all && dependency == "" {
-				return usageErrf("test drill requires --dependency <name> or --all")
+			var resolvedScript string
+			switch drillType {
+			case env.DrillDependencyRestart:
+				if all && dependency != "" {
+					return usageErrf("--dependency and --all are mutually exclusive")
+				}
+				if !all && dependency == "" {
+					return usageErrf("test drill requires --dependency <name> or --all")
+				}
+			case env.DrillScaleLoad:
+				if script == "" {
+					return usageErrf("scale-under-load requires --script <file>")
+				}
+				if all || dependency != "" {
+					return usageErrf("scale-under-load does not take --dependency/--all")
+				}
+				resolvedScript = env.ResolveScriptPath(sliceDir, script)
+			default:
+				return usageErrf("unknown drill type %q (supported: %s, %s)",
+					drillType, env.DrillDependencyRestart, env.DrillScaleLoad)
 			}
 
 			ttlDur, err := slice.ParseTTL(ttl)
@@ -285,14 +318,17 @@ func newTestDrillCmd() *cobra.Command {
 				}()
 			}
 
-			targets := []string{dependency}
-			if all {
-				targets, err = drillTargets(ctx, m, envName)
-				if err != nil {
-					return err
-				}
-				if len(targets) == 0 {
-					return fmt.Errorf("environment %q has no dependencies to drill", envName)
+			targets := []string{""} // scale-under-load runs once, no dependency
+			if drillType == env.DrillDependencyRestart {
+				targets = []string{dependency}
+				if all {
+					targets, err = drillTargets(ctx, m, envName)
+					if err != nil {
+						return err
+					}
+					if len(targets) == 0 {
+						return fmt.Errorf("environment %q has no dependencies to drill", envName)
+					}
 				}
 			}
 
@@ -302,6 +338,7 @@ func newTestDrillCmd() *cobra.Command {
 				res, err := m.RunDrill(ctx, envName, env.DrillSpec{
 					Type:       drillType,
 					Dependency: target,
+					Script:     resolvedScript,
 					Timeout:    timeoutDur,
 				})
 				if err != nil {
@@ -312,6 +349,9 @@ func newTestDrillCmd() *cobra.Command {
 					break // checks not run; the report says "error"
 				}
 				checks = append(checks, res.Check)
+			}
+			if kubot && health.Healthy {
+				checks = append(checks, m.RunKubotDiagnosis(ctx, envName))
 			}
 
 			rep := env.NewReport(health, checks...)
@@ -326,11 +366,13 @@ func newTestDrillCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&envName, "env", "", "environment name (or pass as positional arg)")
-	cmd.Flags().StringVar(&drillType, "type", env.DrillDependencyRestart, "drill type (currently: dependency-restart)")
+	cmd.Flags().StringVar(&drillType, "type", env.DrillDependencyRestart, "drill type: dependency-restart | scale-under-load")
 	cmd.Flags().StringVar(&dependency, "dependency", "", "dependency to target (a service of the environment)")
+	cmd.Flags().StringVar(&script, "script", "", "k6 script driving scale-under-load (required for that type)")
 	cmd.Flags().BoolVar(&all, "all", false, "run the drill against every dependency in the environment")
+	cmd.Flags().BoolVar(&kubot, "kubot", false, "append a non-gating kubot diagnosis check (runs `kubot inspect --json` in the toolbox)")
 	cmd.Flags().DurationVar(&timeoutDur, "timeout", 2*time.Minute, "per-phase observation budget")
-	cmd.Flags().StringVar(&sliceDir, "slice", "", "slice directory (for --create)")
+	cmd.Flags().StringVar(&sliceDir, "slice", "", "slice directory (for --create and resolving relative script paths)")
 	cmd.Flags().StringVar(&ttl, "ttl", "1h", "TTL for the environment when using --create")
 	cmd.Flags().BoolVar(&create, "create", false, "create the environment first (requires --slice)")
 	cmd.Flags().BoolVar(&deleteAfter, "delete-after", false, "delete the environment after the drills")
@@ -392,7 +434,7 @@ func printReport(cmd *cobra.Command, r *env.Report, asJSON bool) {
 }
 
 func printDrillPhases(out io.Writer, c env.Check) {
-	if c.Type != env.CheckTypeDrillDepRestart || len(c.Detail) == 0 {
+	if !strings.HasPrefix(c.Type, "drill:") || len(c.Detail) == 0 {
 		return
 	}
 	var d env.DrillDetail
@@ -415,8 +457,11 @@ func printDrillPhases(out io.Writer, c env.Check) {
 }
 
 func checkMark(s env.CheckStatus) string {
-	if s == env.CheckPass {
+	switch s {
+	case env.CheckPass:
 		return "✓"
+	case env.CheckSkipped:
+		return "-"
 	}
 	return "✗"
 }
