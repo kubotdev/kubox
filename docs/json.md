@@ -34,7 +34,8 @@ under test fail, or is the sandbox itself broken?
 
 - **Report**: `status` (`pass|fail|error`), `environment`
   ([EnvHealth](#environment-health)), `checks[]`.
-- **Check**: `type` (`load`, `drill:dependency-restart`), `status`
+- **Check**: `type` (`load`, `drill:dependency-restart`,
+  `drill:scale-under-load`, `diagnosis`), `status`
   (`pass|fail|error|skipped`), `duration_ms`, `findings[]`, `detail`.
 - **Finding**: `metric`, `expected`, `actual`, `message` — one entry per
   crossed threshold or failed drill phase. Enough for an agent to act
@@ -70,8 +71,12 @@ when you want depth:
 - **load** — the full k6 result, exactly what `kubox test load --json`
   returns: `status`, `exit_code`, `thresholds` (per-threshold value +
   pass), `summary` (requests, rps, p50/p95/p99).
-- **drill** — `target`, `fault` (`delete-pods`), and `phases[]`
+- **drill** — `target`, `fault` (`delete-pods`,
+  `hpa-scale-under-load`), and `phases[]`
   (`name`, `status`, `duration_ms`, `message`) — the per-phase timeline.
+- **diagnosis** (with `--kubot`) — the parsed `kubot inspect --json`
+  report: findings with severity/category/message plus the suppressions
+  that applied. Its shape follows kubot, not kubox.
 
 Treat `detail` as informational: its shape follows the tool (k6 versions,
 new drill types) and may change without notice. The envelope won't.

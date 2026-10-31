@@ -8,7 +8,8 @@ your k6 script, the intelligence lives in the agent — it makes the
 evidence **standardized and trustworthy**.
 
 Two check types today: load ([k6](#load-tests)) and drills
-([dependency-restart](#drills)).
+([dependency-restart](#drills), [scale-under-load](#scale-under-load)).
+`--kubot` adds a [diagnosis](#diagnosis) check to either.
 
 ## The loop
 
@@ -86,6 +87,30 @@ finding names where recovery broke:
 After the first failed or timed-out phase, the remaining ones are marked
 `skipped` — no point measuring replicas while the dependency is still down.
 
+### `scale-under-load`
+
+With `app.scaling` in the slice, verifies the HPA actually works when
+traffic arrives — and that the SLO holds while it scales:
+
+```sh
+kubox test drill fix-auth --type scale-under-load --script load.js --json
+```
+
+The k6 script runs for the drill's duration; the drill watches the
+deployment, each phase timed:
+
+| Phase | Pass criterion |
+|---|---|
+| `baseline` | the HPA reports `ScalingActive` — fails with a metrics-server hint when it doesn't |
+| `scale_up` | replicas exceed the baseline *during* the load |
+| `load_slo` | the k6 script's own thresholds all pass (they are the assertion) |
+| `settle` | steady state: app still healthy |
+
+Preflight catches the two setup mistakes before running: no `scaling` block
+→ `error` with "add `app.scaling`", `min == max` → `error` with "raise
+`app.scaling.max`". Scale-down is never asserted — the HPA's default
+stabilization window is five minutes, so waiting for it in CI is noise.
+
 ### More drills later
 
 The slice is the fault model; drills are derived from declared fields, not
@@ -95,7 +120,6 @@ discovered:
 |---|---|---|
 | `dependencies[].volume` | `volume-survives` | data survives the restart |
 | `app.resources` limits | `resource-pressure` | throttle/OOMKill handling |
-| `app.scaling` | `scale-under-load` | HPA scales, SLO holds |
 
 ### Drill safety
 
@@ -105,6 +129,29 @@ discovered:
   injected and the report says `error` (exit 3), never a misleading `fail`.
 - A settle phase returns the environment to steady state, so a following
   load test can't fail spuriously against a still-recovering dependency.
+
+## Diagnosis
+
+If **[kubot](https://github.com/kubotdev/kubot)** is available, `--kubot`
+folds its read-only inspection of the environment's namespace into the
+envelope as a `diagnosis` check:
+
+```sh
+kubox test load fix-auth --script load.js --report --kubot --json
+kubox test drill fix-auth --all --kubot --json
+```
+
+- Runs `kubot inspect -n <namespace> --json` inside the toolbox (no kubot
+  install on the runner needed).
+- The check fails only on non-suppressed **`critical`** findings;
+  warnings/notes are reported, never gating.
+- kubot missing or output unparseable → `skipped` (with the reason), so an
+  absent tool never fails a run.
+- The parsed kubot report rides in `checks[].detail`; suppressed issues
+  never gate. The check is appended only when the environment is healthy.
+
+`test load --kubot` requires `--report` — a bare k6 result has nowhere to
+put it.
 
 ## Reading results
 

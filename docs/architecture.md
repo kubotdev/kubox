@@ -28,7 +28,7 @@ network policy, TTL, preflight.
 |---|---|---|
 | Commands | `cmd/kubox` | one file per command + `main` (exit codes, manager bootstrap, TTL sweep); no logic beyond flags |
 | Slice | `internal/slice` | `kubox.yaml` parse, validation, defaults; `EnvNamespace` (`kubox-<name>`) |
-| Manager | `internal/env` | namespace/deploy/quota/netpol/RBAC lifecycle, re-sync + prune, toolbox exec, one-shot runner, k6 pod runner, drill engine, verification envelope, `CheckEnv` preflight |
+| Manager | `internal/env` | namespace/deploy/quota/netpol/RBAC lifecycle, re-sync + prune, toolbox exec, one-shot runner, k6 pod runner, drill engine, kubot diagnosis, verification envelope, `CheckEnv` preflight |
 | Client | `internal/k8s` | kubeconfig resolution (kubectl semantics), clientset |
 | MCP | `internal/mcp` | generic stdio JSON-RPC server (tools/prompts/resources); no kubox specifics — tools are wired in `cmd/kubox/mcp.go` |
 
@@ -36,8 +36,12 @@ Conventions: mutation only ever targets namespaces labeled
 `kubox.dev/env`; kubox owns lifecycle and evidence — `kubox build` is a
 `docker build` + `kind load` passthrough, never a registry or build
 service; tests use fake clients (never a live cluster), with injectable
-seams (`waitFn`, `probeFn`, `runCommand`) where a real cluster would
-otherwise be needed.
+seams (`waitFn`, `probeFn`, `runCommand`, `loadFn`, `execFn`) where a real
+cluster would otherwise be needed.
+
+CI (`action.yml` + `scripts/ci.sh`) is a thin composite wrapper — same
+CLI, same envelope, on a throwaway kind cluster — never a second
+implementation.
 
 ## Lifecycle
 

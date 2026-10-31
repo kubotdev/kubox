@@ -16,7 +16,7 @@ fix, re-sync, verify, tear down — without a human in the session.
 | `list` | — | live environments |
 | `status` | `name` | one environment's status |
 | `test_load` | `name`, `script` | k6 result (thresholds + summary) |
-| `test_drill` | `name`, `type?`, `dependency?`, `all?`, `timeout?` | [verification envelope](json.md) |
+| `test_drill` | `name`, `type?`, `dependency?`, `all?`, `script?`, `kubot?`, `timeout?` | [verification envelope](json.md) |
 
 ```json
 {

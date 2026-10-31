@@ -15,8 +15,10 @@ Global flags (every command): `--kubeconfig`, `--context`, `--timeout`
 | `status N` | One environment's status |
 | `test load N --script f.js` | k6 load test against the app endpoint |
 | `test load N --report [--json]` | Same, wrapped in the [verification envelope](json.md) |
+| `test load N --report --kubot` | Also fold in a kubot diagnosis check (see [Testing](testing.md#diagnosis)) |
 | `test drill N --dependency d` | Failure drill: restart a dependency, verify the app recovers |
 | `test drill N --all` | Drill every dependency in the environment |
+| `test drill N --type scale-under-load --script f.js` | Verify the HPA scales under load while the k6 SLO holds |
 | `mcp` | MCP server on stdio (see [MCP](mcp.md)) |
 
 `test load` and `test drill` accept the one-shot set: `--create --slice
@@ -26,10 +28,12 @@ Global flags (every command): `--kubeconfig`, `--context`, `--timeout`
 
 - `up`: `--name` (required), `--ttl` (required mindset — see below).
 - `test load`: `--script` (required), `--report` for the envelope,
-  `--json` for machines.
+  `--json` for machines, `--kubot` (with `--report`) to append a diagnosis
+  check.
 - `test drill`: `--dependency` or `--all`, `--type` (default
-  `dependency-restart`), `--timeout` (per-phase budget, default 2 m),
-  `--json`.
+  `dependency-restart`; `scale-under-load` needs `--script` +
+  `app.scaling`), `--timeout` (per-phase budget, default 2 m), `--json`,
+  `--kubot`.
 
 ## Exit codes
 

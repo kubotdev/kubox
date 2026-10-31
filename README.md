@@ -20,12 +20,13 @@
   <a href="#getting-images-into-the-environment">Images</a> ·
   <a href="#use-it-with-your-agent">Agents</a> ·
   <a href="#commands">Commands</a> ·
+  <a href="#github-action">CI</a> ·
   <a href="#mcp">MCP</a> ·
   <a href="docs/">Docs</a> ·
   <a href="#roadmap">Roadmap</a>
 </p>
 
-> **Status: early (v0.1).** Sharp edges expected; the CLI and MCP tool surface
+> **Status: early (v0.3).** Sharp edges expected; the CLI and MCP tool surface
 > may change. kubox does not build or push images — see
 > [Getting images into the environment](#getting-images-into-the-environment).
 
@@ -204,6 +205,9 @@ kubox exec demo -- kubectl autoscale deployment payment --min=2 --max=10 --cpu-p
 kubox test load demo --script load.js
 kubox exec demo -- kubectl get hpa -w
 
+# or, with `scaling` in the slice, the built-in drill does it:
+kubox test drill demo --type scale-under-load --script load.js
+
 # resource pressure: set tight limits in the slice, re-sync, crush,
 # and watch throttle/OOMKill + restart
 kubox exec demo -- kubectl get pods -w
@@ -212,7 +216,11 @@ kubox exec demo -- kubectl get pods -w
 Diagnosing failures: if **[kubot](https://github.com/kubotdev/kubot)** is
 installed, run it against the environment's namespace (`kubot inspect -n
 kubox-demo`) for a read-only, findings-first report — it resolves the same
-kubeconfig. Without kubot, everything you need is already in the toolbox:
+kubeconfig. Or let kubox fold it into the envelope: `--kubot` (on
+`test load --report` and `test drill`) runs `kubot inspect --json` inside
+the toolbox and appends a non-gating `diagnosis` check — only `critical`
+findings fail it, and it's `skipped` when kubot isn't available. Without
+kubot, everything you need is already in the toolbox:
 `kubox exec demo -- kubectl describe pod <pod>`, `kubectl logs <pod>`, or
 `kubot` installed *inside* the environment via a custom `toolbox.image` in
 the slice (kubot supports in-cluster config).
@@ -417,6 +425,19 @@ dependency, `--create --delete-after` for the one-shot form. The environment
 is preflighted first; an unhealthy sandbox returns `error` (exit 3), never a
 misleading `fail`.
 
+With `app.scaling` in the slice, `scale-under-load` verifies the other half —
+that the HPA actually works when traffic arrives:
+
+```sh
+kubox test drill fix-auth --type scale-under-load --script load.js --json
+```
+
+The k6 script runs while the drill watches the deployment: `baseline` (the
+HPA is active — this fails with a metrics-server hint when it isn't),
+`scale_up` (replicas exceed the baseline *during* the load), `load_slo`
+(the script's own thresholds are the assertion), `settle`. Scale-down is
+never asserted — the HPA's default stabilization window is five minutes.
+
 ## Use it with your agent
 
 kubox ships a skill that teaches coding agents the judgment layer — the
@@ -473,6 +494,28 @@ timeout if you run load tests through it (k6 runs can exceed the default):
 
 Tools: `up`, `build`, `down`, `exec`, `list`, `status`, `test_load`, `test_drill`.
 
+## GitHub Action
+
+For CI/PR verification, the composite action runs the whole loop on a
+throwaway kind cluster (or your own) and exposes the envelope as outputs:
+
+```yaml
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: kubotdev/kubox@v0.3.0
+        with:
+          slice: myapp.kubox
+          script: myapp.kubox/tests/load.js
+          drill: dependency-restart:postgres   # or scale-under-load, or none
+```
+
+The step's exit code mirrors the envelope (`0` pass, `1` fail, `3` error),
+and `status`, `report`, `drill-report` outputs carry the JSON for the next
+step. Details: [docs/ci.md](docs/ci.md).
+
 ## Commands
 
 | Command | What it does |
@@ -485,8 +528,9 @@ Tools: `up`, `build`, `down`, `exec`, `list`, `status`, `test_load`, `test_drill
 | `kubox exec --create N --slice D --delete-after -- <cmd>` | One-shot: create, run, delete |
 | `kubox list` | List live environments |
 | `kubox status N` | Show one environment's status |
-| `kubox test load N --script f.js` | Run a k6 load test (`--json` for machines, `--report` for the verification envelope) |
+| `kubox test load N --script f.js` | Run a k6 load test (`--json` for machines, `--report` for the envelope, `--kubot` to fold in diagnosis) |
 | `kubox test drill N --dependency d` | Failure drill: restart a dependency, verify the app recovers (`--all`, `--json`) |
+| `kubox test drill N --type scale-under-load --script f.js` | Verify the HPA scales under k6 load while the SLO holds |
 | `kubox mcp` | Run as an MCP server |
 
 ## Roadmap
@@ -495,9 +539,12 @@ kubox stays a **lifecycle + guardrails + measurement** layer — it will not
 grow a build system, a registry, or a UI (`kubox build` is a docker +
 `kind load` convenience, nothing more). What's next, roughly:
 
-- **v0.3** — more drills derived from the slice (`resource-pressure`,
-  `scale-under-load`), CI/PR one-shots and a GitHub Action (the `--create
-  --delete-after --json` contract already exists)
+- **v0.4** — more drills derived from the slice (network policies), and
+  richer diagnosis folding
+
+Already in (v0.3): the `scale-under-load` drill, kubot diagnosis in the
+envelope (`--kubot`), and the CI/PR GitHub Action — see
+[docs/testing.md](docs/testing.md) and [docs/ci.md](docs/ci.md).
 
 Already in (v0.2): `kubox init`, `kubox build`, the committed example app
 ([demo/shop](demo/shop)), and the official toolbox image

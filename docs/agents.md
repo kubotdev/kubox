@@ -45,7 +45,8 @@ The agent performs, per task:
 
 The [envelope](json.md) is what closes the loop autonomously: `fail` tells
 the agent which metric missed, `error` tells it to look at the environment
-instead of the code. No parsing of terminal prose, no guessing.
+instead of the code. With `--kubot`, a kubot diagnosis check rides along in
+the same envelope. No parsing of terminal prose, no guessing.
 
 ## MCP for the full surface
 

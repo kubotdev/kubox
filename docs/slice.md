@@ -52,7 +52,7 @@ quotas:
 | `app.env` | no | — | plain env vars |
 | `app.healthcheck.path` | no | — | must start with `/`; adds readiness **and** liveness HTTP probes (liveness gets +10 s initial delay) |
 | `app.resources` | no | requests `50m`/`64Mi` | `requestsCPU/requestsMemory/limitsCPU/limitsMemory`; tight limits let you test throttle/OOMKill |
-| `app.scaling` | no | — | managed HPA: `min` (≥1, default 1), `max` (required), `cpuPercent` (default 70) |
+| `app.scaling` | no | — | managed HPA: `min` (≥1, default 1), `max` (required), `cpuPercent` (default 70); validated by the `scale-under-load` drill |
 | `dependencies[]` | no | — | each needs `name` + `image`; same `env`/`resources` as app; single replica |
 | `dependencies[].volume` | no | — | `size` + `path`: a PVC mounted at `path`; survives re-syncs and pod restarts, deleted with the environment |
 | `quotas` | no | cpu `2`, memory `4Gi`, pods `20` | namespace-wide — see below |
