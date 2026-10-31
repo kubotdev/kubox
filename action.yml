@@ -1,0 +1,67 @@
+name: 'kubox verify'
+description: 'Run kubox verification in CI: provision a disposable Kubernetes environment (kind by default), run a k6 load test and an optional failure drill, then tear everything down.'
+author: 'kubotdev'
+branding:
+  icon: 'shield'
+  color: 'blue'
+
+inputs:
+  slice:
+    description: 'Path to the slice directory (contains kubox.yaml).'
+    required: true
+  script:
+    description: 'k6 script — absolute, or relative to the slice directory (tests/ is searched).'
+    required: true
+  name:
+    description: 'Environment name (becomes the namespace suffix).'
+    required: false
+    default: 'ci'
+  cluster:
+    description: 'kind — create a throwaway kind cluster (default); existing — use the current kubeconfig context as-is.'
+    required: false
+    default: 'kind'
+  build:
+    description: 'Build the slice image (docker + kind load) before up.'
+    required: false
+    default: 'true'
+  drill:
+    description: 'Drill after the load test: none (default), dependency-restart:<service>, or scale-under-load (needs app.scaling; metrics-server is installed into kind clusters automatically).'
+    required: false
+    default: 'none'
+  ttl:
+    description: 'Environment time-to-live, e.g. 30m, 1h.'
+    required: false
+    default: '30m'
+  kubox-version:
+    description: 'kubox release tag to install, e.g. v0.3.0 (latest by default).'
+    required: false
+    default: 'latest'
+
+outputs:
+  status:
+    description: 'Verification status: pass | fail | error.'
+    value: ${{ steps.verify.outputs.status }}
+  report:
+    description: 'Load test report JSON (the verification-contract envelope).'
+    value: ${{ steps.verify.outputs.report }}
+  drill-report:
+    description: 'Drill report JSON (empty when drill is none).'
+    value: ${{ steps.verify.outputs.drill_report }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Run kubox verification
+      id: verify
+      shell: bash
+      env:
+        SLICE: ${{ inputs.slice }}
+        SCRIPT: ${{ inputs.script }}
+        ENV_NAME: ${{ inputs.name }}
+        CLUSTER: ${{ inputs.cluster }}
+        BUILD: ${{ inputs.build }}
+        DRILL: ${{ inputs.drill }}
+        TTL: ${{ inputs.ttl }}
+        KUBOX_VERSION: ${{ inputs['kubox-version'] }}
+        KUBOX_ACTION_PATH: ${{ github.action_path }}
+      run: bash "${{ github.action_path }}/scripts/ci.sh"
