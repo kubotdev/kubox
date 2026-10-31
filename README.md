@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/img/kubot.png" alt="" width="82" height="82">
+</p>
+
 <h1 align="center">kubox</h1>
 
 <p align="center">
@@ -281,11 +285,18 @@ kubox exec --create fix-auth --slice myapp.kubox --ttl 1h --delete-after -- \
 ## Load tests are pass/fail signals
 
 ```sh
-kubox test load fix-auth --script tests/load.js
+kubox test load fix-auth --slice myapp.kubox   # defaults to myapp.kubox/tests/load.js
+kubox test load fix-auth --script load.js      # or name it explicitly
 ```
 
 The k6 script's `BASE_URL` is set automatically. Thresholds in the script
 become the pass/fail signal the agent (or CI) acts on:
+
+**Who writes the test: the agent.** It lives in the slice
+(`tests/load.js`; `kubox init` scaffolds it) — omit `--script` and kubox
+uses that slot, and refuses (exit 64) when it's missing. The agent authors
+and updates the script per task; you review its thresholds in the PR like
+code, because they are the SLO claim.
 
 ```javascript
 export const options = {
@@ -507,8 +518,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: kubotdev/kubox@v0.3.0
         with:
-          slice: myapp.kubox
-          script: myapp.kubox/tests/load.js
+          slice: myapp.kubox            # uses myapp.kubox/tests/load.js
           drill: dependency-restart:postgres   # or scale-under-load, or none
 ```
 

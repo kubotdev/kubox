@@ -12,8 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: kubotdev/kubox@v0.3.0
         with:
-          slice: myapp.kubox
-          script: myapp.kubox/tests/load.js
+          slice: myapp.kubox            # uses myapp.kubox/tests/load.js
           drill: dependency-restart:postgres
 ```
 
@@ -22,7 +21,7 @@ jobs:
 | Input | Default | What it does |
 |---|---|---|
 | `slice` | — (required) | Slice directory (contains `kubox.yaml`) |
-| `script` | — (required) | k6 script — absolute, or relative to the slice (`tests/` searched) |
+| `script` | `<slice>/tests/load.js` | k6 script — absolute, or relative to the slice (`tests/` searched). Omit to use the convention slot; missing file → exit 64 (the agent writes the test) |
 | `name` | `ci` | Environment name (namespace suffix) |
 | `cluster` | `kind` | `kind` creates a throwaway cluster; `existing` uses the current kubeconfig context |
 | `build` | `true` | `docker build` + `kind load` before `up` (skipped automatically when the slice has no `app.build`) |

@@ -41,7 +41,7 @@ results or tune thresholds until they pass.
 | Deploy / update a slice | `kubox up <dir> --name <env> --ttl 1h` |
 | What's alive / when does it expire? | `kubox list` · `kubox status <env>` |
 | Run something inside the environment | `kubox exec <env> -- <cmd>` (kubectl, curl, sh) |
-| Is it fast/robust enough? | `kubox test load <env> --script load.js` (`--json` for machines) |
+| Is it fast/robust enough? | `kubox test load <env> --slice <dir>` (uses `<dir>/tests/load.js`; `--json` for machines) |
 | Tear it down | `kubox down <env>` (waits until gone) |
 | One-shot create→run→delete | `kubox exec --create <env> --slice <dir> --ttl 1h --delete-after -- <cmd>` |
 
@@ -68,9 +68,12 @@ quotas: {cpu: "2", memory: 4Gi, pods: "20"}          # namespace-wide caps
 ## Playbooks
 
 ### Load (the core signal)
-Write k6 with explicit thresholds (`http_req_duration: ['p(95)<100']`). `test load`
-exits non-zero when they're violated — that's the signal to **fix, not loosen**.
-Save the failing run's JSON for the after-comparison.
+Write k6 with explicit thresholds (`http_req_duration: ['p(95)<100']`). No test
+exists yet? That's your job: write `<slice>/tests/load.js` (endpoints from the
+slice's healthcheck/services) — with `--slice`, kubox defaults to that file and
+exits 64 when it's missing. `test load` exits non-zero when thresholds are
+violated — that's the signal to **fix, not loosen**. Save the failing run's JSON
+for the after-comparison.
 
 ### Recovery
 - Dependency first: `kubox test drill <env> --dependency postgres --json` — the
@@ -96,6 +99,8 @@ manual path: `docker build -t <img> .` → `kind load docker-image <img> --name 
 
 Don't stall; each gap has one fix:
 
+- **No load test:** write `<slice>/tests/load.js` — endpoints from the slice's
+  healthcheck, thresholds state the SLO. kubox won't run without it (exit 64).
 - **`kubox` not on PATH:** install — `curl -fsSL https://raw.githubusercontent.com/kubotdev/kubox/main/skills/install.sh | sh` (or `go install github.com/kubotdev/kubox/cmd/kubox@latest`).
 - **No cluster / kubeconfig:** `kind create cluster` (~30s), or ask the user for the context. kubox resolves kubeconfig exactly like kubectl.
 - **ImagePullBackOff after `up`:** the image isn't in the cluster — `kubox build <slice>` (or build + `kind load docker-image` / registry push yourself); `up` again to re-sync.
@@ -109,23 +114,26 @@ Don't stall; each gap has one fix:
    A leaked environment is a bug you caused.
 2. **Thresholds are the contract.** A FAIL means fix the code. Never edit thresholds
    to turn a failing run green, and never report a run you didn't actually complete.
-3. **Keep the failing numbers.** Report before/after with kubot's (or kubectl's)
+3. **You author the load test.** No `<slice>/tests/load.js` → write it before
+   `test load` (kubox defaults to it via `--slice` and refuses without it).
+   Never call an ad-hoc script without thresholds verification.
+4. **Keep the failing numbers.** Report before/after with kubot's (or kubectl's)
    evidence: p95/p99, error rate, restarts, exit codes. One table beats adjectives.
-4. **Re-sync, don't recreate.** Same name = in-place update with data volumes intact.
+5. **Re-sync, don't recreate.** Same name = in-place update with data volumes intact.
    Delete only when you intentionally want a from-scratch state.
-5. **kubox build is a convenience, not a build service.** It runs `docker build` +
+6. **kubox build is a convenience, not a build service.** It runs `docker build` +
    `kind load` for kind. Remote clusters: registry push is yours. Then re-sync.
-6. **Diagnose before fixing.** If kubot is installed: `kubot inspect -n kubox-<env>`
+7. **Diagnose before fixing.** If kubot is installed: `kubot inspect -n kubox-<env>`
    (read-only, findings-first). Otherwise: `kubectl describe/logs/events` via exec.
    Never guess a root cause the data doesn't support.
-7. **`exec` is one-shot, non-interactive.** Use `sh -c '...'` for pipes and loops.
-8. **The toolbox SA is namespace-scoped `edit`.** Scale/delete/patch work inside the
+8. **`exec` is one-shot, non-interactive.** Use `sh -c '...'` for pipes and loops.
+9. **The toolbox SA is namespace-scoped `edit`.** Scale/delete/patch work inside the
    environment; nodes, namespaces, and PVs are out of reach — by design.
-9. **Read the failure kind before fixing.** In verification output (`test load --report`,
-   `test drill`), `status: "error"` + exit 3 means the *environment* is unhealthy and
-   checks didn't run — fix the env/slice (image, quota, crashlooping dep) and re-run;
-   never change app code for an `error`. Only `status: "fail"` + exit 1 implicates
-   your change.
+10. **Read the failure kind before fixing.** In verification output (`test load --report`,
+    `test drill`), `status: "error"` + exit 3 means the *environment* is unhealthy and
+    checks didn't run — fix the env/slice (image, quota, crashlooping dep) and re-run;
+    never change app code for an `error`. Only `status: "fail"` + exit 1 implicates
+    your change.
 
 ## Output shape
 

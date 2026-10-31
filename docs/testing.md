@@ -29,6 +29,11 @@ create → break → fix → prove → destroy
 kubox test load fix-auth --script tests/load.js --report --json
 ```
 
+The test is **agent-owned**: it lives in the slice (`tests/load.js`), the
+agent writes it — endpoints from the slice's healthcheck, thresholds
+state the SLO — and with `--slice` kubox defaults to that slot (missing
+file → exit 64; a run without thresholds isn't verification).
+
 The k6 script's `BASE_URL` is set automatically to the app's in-cluster
 DNS name. Thresholds in the script are the contract:
 

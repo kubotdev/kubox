@@ -27,13 +27,14 @@ Global flags (every command): `--kubeconfig`, `--context`, `--timeout`
 ## Flags that matter
 
 - `up`: `--name` (required), `--ttl` (required mindset — see below).
-- `test load`: `--script` (required), `--report` for the envelope,
-  `--json` for machines, `--kubot` (with `--report`) to append a diagnosis
-  check.
+- `test load`: `--script` (omit with `--slice` and the slice's
+  `tests/load.js` is used — the agent authors that file; missing → 64),
+  `--report` for the envelope, `--json` for machines, `--kubot` (with
+  `--report`) to append a diagnosis check.
 - `test drill`: `--dependency` or `--all`, `--type` (default
-  `dependency-restart`; `scale-under-load` needs `--script` +
-  `app.scaling`), `--timeout` (per-phase budget, default 2 m), `--json`,
-  `--kubot`.
+  `dependency-restart`; `scale-under-load` needs `--script` or `--slice`
+  with `tests/load.js`, plus `app.scaling`), `--timeout` (per-phase
+  budget, default 2 m), `--json`, `--kubot`.
 
 ## Exit codes
 

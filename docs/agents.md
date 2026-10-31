@@ -30,14 +30,16 @@ Details: [`skills/README.md`](../skills/README.md).
 The human sets the stage, once:
 
 - write the [slice](slice.md) — the app, its neighbors, quotas
-- optionally write the k6 threshold template (or let the agent draft one)
+- review the thresholds the agent writes — they're the SLO claim, and the
+  one place a lazy agent could weaken the contract
 
 The agent performs, per task:
 
 | Step | Command |
 |---|---|
 | create | `kubox up <slice> --name task-42 --ttl 30m` (or `--create`) |
-| verify under load | `kubox test load task-42 --script load.js --report --json` |
+| write the test | `tests/load.js` in the slice — you author it: endpoints from the slice's healthcheck, thresholds state the SLO (kubox refuses to run without it) |
+| verify under load | `kubox test load task-42 --slice <slice> --report --json` (defaults to the slice's `tests/load.js`) |
 | verify against failure | `kubox test drill task-42 --all --json` |
 | fix | edit code → `kubox build` → `kubox up` again (re-sync rolls pods) |
 | prove | re-run the checks — `pass` plus the findings is the evidence |
