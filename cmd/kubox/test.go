@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +16,24 @@ import (
 	"github.com/kubotdev/kubox/internal/env"
 	"github.com/kubotdev/kubox/internal/slice"
 )
+
+// resolveLoadScript applies the agent-owned convention: when --script is
+// omitted but the slice is known, the load test is the slice's
+// tests/load.js. The agent authors that file; kubox only points at the slot
+// and refuses to run without it.
+func resolveLoadScript(sliceDir, script string) (string, error) {
+	if script != "" {
+		return env.ResolveScriptPath(sliceDir, script), nil
+	}
+	if sliceDir == "" {
+		return "", usageErrf("--script <file> is required (or pass --slice <dir> to use its tests/load.js)")
+	}
+	def := filepath.Join(sliceDir, "tests", "load.js")
+	if _, err := os.Stat(def); err != nil {
+		return "", usageErrf("no load test at %s — write it first (the agent authors the k6 test; thresholds are the contract)", def)
+	}
+	return def, nil
+}
 
 func loadTestContext(cmd *cobra.Command) (context.Context, context.CancelFunc) {
 	if cmd.Root().PersistentFlags().Changed("timeout") {
@@ -75,8 +95,12 @@ func newTestLoadCmd() *cobra.Command {
 			if envName == "" {
 				return usageErrf("test load requires an environment name")
 			}
-			if script == "" {
-				return usageErrf("test load requires --script <file>")
+			if script == "" && sliceDir == "" {
+				return usageErrf("test load requires --script <file> (or --slice <dir> to use its tests/load.js)")
+			}
+			resolved, err := resolveLoadScript(sliceDir, script)
+			if err != nil {
+				return err
 			}
 			if kubot && !report {
 				return usageErrf("--kubot requires --report")
@@ -136,8 +160,6 @@ func newTestLoadCmd() *cobra.Command {
 				health = h
 			}
 
-			resolved := env.ResolveScriptPath(sliceDir, script)
-
 			start := time.Now()
 			result, err := m.RunLoadTest(ctx, envName, resolved)
 			if err != nil {
@@ -170,7 +192,7 @@ func newTestLoadCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&envName, "env", "", "environment name (or pass as positional arg)")
-	cmd.Flags().StringVar(&script, "script", "", "path to the k6 script (.js)")
+	cmd.Flags().StringVar(&script, "script", "", "path to the k6 script (.js); with --slice, defaults to its tests/load.js")
 	cmd.Flags().StringVar(&sliceDir, "slice", "", "slice directory (for resolving relative script paths)")
 	cmd.Flags().BoolVar(&create, "create", false, "create the environment first (requires --slice)")
 	cmd.Flags().BoolVar(&deleteAfter, "delete-after", false, "delete the environment after the test")
@@ -268,13 +290,14 @@ func newTestDrillCmd() *cobra.Command {
 					return usageErrf("test drill requires --dependency <name> or --all")
 				}
 			case env.DrillScaleLoad:
-				if script == "" {
-					return usageErrf("scale-under-load requires --script <file>")
-				}
 				if all || dependency != "" {
 					return usageErrf("scale-under-load does not take --dependency/--all")
 				}
-				resolvedScript = env.ResolveScriptPath(sliceDir, script)
+				var serr error
+				resolvedScript, serr = resolveLoadScript(sliceDir, script)
+				if serr != nil {
+					return serr
+				}
 			default:
 				return usageErrf("unknown drill type %q (supported: %s, %s)",
 					drillType, env.DrillDependencyRestart, env.DrillScaleLoad)
@@ -368,7 +391,7 @@ func newTestDrillCmd() *cobra.Command {
 	cmd.Flags().StringVar(&envName, "env", "", "environment name (or pass as positional arg)")
 	cmd.Flags().StringVar(&drillType, "type", env.DrillDependencyRestart, "drill type: dependency-restart | scale-under-load")
 	cmd.Flags().StringVar(&dependency, "dependency", "", "dependency to target (a service of the environment)")
-	cmd.Flags().StringVar(&script, "script", "", "k6 script driving scale-under-load (required for that type)")
+	cmd.Flags().StringVar(&script, "script", "", "k6 script driving scale-under-load (with --slice, defaults to its tests/load.js)")
 	cmd.Flags().BoolVar(&all, "all", false, "run the drill against every dependency in the environment")
 	cmd.Flags().BoolVar(&kubot, "kubot", false, "append a non-gating kubot diagnosis check (runs `kubot inspect --json` in the toolbox)")
 	cmd.Flags().DurationVar(&timeoutDur, "timeout", 2*time.Minute, "per-phase observation budget")

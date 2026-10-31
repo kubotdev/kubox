@@ -180,7 +180,7 @@ func kuboxTools() []mcp.Tool {
 					},
 					"script": map[string]any{
 						"type":        "string",
-						"description": "Path to the k6 script (.js) on the local filesystem.",
+						"description": "Path to the k6 script (.js) on the local filesystem — the agent authors it (typically the slice's tests/load.js).",
 					},
 				},
 			},

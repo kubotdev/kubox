@@ -10,8 +10,9 @@ inputs:
     description: 'Path to the slice directory (contains kubox.yaml).'
     required: true
   script:
-    description: 'k6 script — absolute, or relative to the slice directory (tests/ is searched).'
-    required: true
+    description: 'k6 script — absolute, or relative to the slice directory (tests/ is searched). Omit to use <slice>/tests/load.js — the agent authors that file.'
+    required: false
+    default: ''
   name:
     description: 'Environment name (becomes the namespace suffix).'
     required: false

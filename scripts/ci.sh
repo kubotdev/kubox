@@ -6,7 +6,7 @@
 set -euo pipefail
 
 SLICE="${SLICE:?input 'slice' is required}"
-SCRIPT="${SCRIPT:?input 'script' is required}"
+SCRIPT="${SCRIPT:-}"
 ENV_NAME="${ENV_NAME:-ci}"
 CLUSTER="${CLUSTER:-kind}"
 BUILD="${BUILD:-true}"
@@ -77,6 +77,22 @@ emit() {
   echo "kubox verification: $status (exit $rc)"
   exit "$rc"
 }
+
+if [ ! -f "$SLICE/kubox.yaml" ]; then
+  echo "::error::no kubox.yaml in '$SLICE'"
+  emit error 64
+fi
+
+# The agent authors the load test; the action only points at the convention
+# slot. No tests/load.js is a usage error, not a skipped check.
+if [ -z "$SCRIPT" ]; then
+  if [ -f "$SLICE/tests/load.js" ]; then
+    SCRIPT="$SLICE/tests/load.js"
+  else
+    echo "::error::no load test at $SLICE/tests/load.js — write it first (the agent authors the k6 test; thresholds are the contract)"
+    emit error 64
+  fi
+fi
 
 echo "--- install kubox ($KUBOX_VERSION)"
 case "$CLUSTER" in
