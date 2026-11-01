@@ -34,7 +34,7 @@ inputs:
     required: false
     default: '30m'
   kubox-version:
-    description: 'kubox release tag to install, e.g. v0.3.0 (latest by default). Use source to build kubox from this checkout instead (dogfooding unreleased changes; needs Go).'
+    description: 'kubox release tag to install, e.g. v0.4.0 (latest by default). Use source to build kubox from this checkout instead (dogfooding unreleased changes; needs Go).'
     required: false
     default: 'latest'
 

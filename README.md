@@ -530,7 +530,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kubotdev/kubox@v0.3.0
+      - uses: kubotdev/kubox@v0.4.0
         with:
           slice: myapp.kubox            # uses myapp.kubox/tests/load.js
           drill: dependency-restart:postgres   # or scale-under-load, or none

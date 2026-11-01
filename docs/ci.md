@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: kubotdev/kubox@v0.3.0
+      - uses: kubotdev/kubox@v0.4.0
         with:
           slice: myapp.kubox            # uses myapp.kubox/tests/load.js
           drill: dependency-restart:postgres
@@ -41,7 +41,7 @@ kubox's own CI runs this action against [demo/shop](../demo/shop) with
 | `drill-report` | Drill envelope JSON (empty when `drill: none`) |
 
 ```yaml
-- uses: kubotdev/kubox@v0.3.0
+- uses: kubotdev/kubox@v0.4.0
   id: kubox
   with: { slice: myapp.kubox, script: load.js }
 - run: echo "${{ steps.kubox.outputs.report }}" | jq .
