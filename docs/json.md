@@ -35,7 +35,7 @@ under test fail, or is the sandbox itself broken?
 - **Report**: `status` (`pass|fail|error`), `environment`
   ([EnvHealth](#environment-health)), `checks[]`.
 - **Check**: `type` (`load`, `drill:dependency-restart`,
-  `drill:scale-under-load`, `diagnosis`), `status`
+  `drill:scale-under-load`, `drill:volume-survives`, `diagnosis`), `status`
   (`pass|fail|error|skipped`), `duration_ms`, `findings[]`, `detail`.
 - **Finding**: `metric`, `expected`, `actual`, `message` — one entry per
   crossed threshold or failed drill phase. Enough for an agent to act
@@ -83,8 +83,14 @@ new drill types) and may change without notice. The envelope won't.
 
 ## Stability
 
-Additive only: existing fields never change meaning or type. `findings[]`
+The envelope's shape is versioned and machine-checkable: a JSON Schema is
+generated from the Go types and committed as
+`schema/kubox-envelope-<version>.json` (a drift-guard test fails CI when
+the two diverge). It is additive only: existing fields never change
+meaning or type. `findings[]`
 ordering is not part of the contract — sort by `metric` if you need
 determinism. `status` and the [exit codes](commands.md#exit-codes) always
 agree: `pass`↔0, `fail`↔1, `error`↔3, so shell (`if kubox …; then`) and
-JSON consumers get the same trichotomy.
+JSON consumers get the same trichotomy. A drill that can't run as
+requested (missing volume/HPA, bad flag) exits 64 with no envelope at all
+— a usage mistake is never dressed up as a result.

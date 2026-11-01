@@ -8,7 +8,8 @@ your k6 script, the intelligence lives in the agent — it makes the
 evidence **standardized and trustworthy**.
 
 Two check types today: load ([k6](#load-tests)) and drills
-([dependency-restart](#drills), [scale-under-load](#scale-under-load)).
+([dependency-restart](#drills), [scale-under-load](#scale-under-load),
+[volume-survives](#volume-survives)).
 `--kubot` adds a [diagnosis](#diagnosis) check to either.
 
 ## The loop
@@ -111,10 +112,34 @@ deployment, each phase timed:
 | `load_slo` | the k6 script's own thresholds all pass (they are the assertion) |
 | `settle` | steady state: app still healthy |
 
-Preflight catches the two setup mistakes before running: no `scaling` block
-→ `error` with "add `app.scaling`", `min == max` → `error` with "raise
-`app.scaling.max`". Scale-down is never asserted — the HPA's default
+Preflight catches the two setup mistakes before the drill runs, exiting
+64: no `scaling` block → "add `app.scaling`", `min == max` → "raise
+`app.scaling.max`". A drill that can't run is a usage error, never a
+misleading `fail`. Scale-down is never asserted — the HPA's default
 stabilization window is five minutes, so waiting for it in CI is noise.
+
+### `volume-survives`
+
+With `dependencies[].volume` in the slice, verifies the data on a
+dependency's volume actually survives its pod being replaced — the
+PVC-mount check a "restart it and see if it comes back" test never makes:
+
+```sh
+kubox test drill fix-auth --type volume-survives --dependency postgres --json
+```
+
+| Phase | Pass criterion |
+|---|---|
+| `inject` | a probe file (nonce) is written into the volume, *then* the dependency's pods are deleted |
+| `dependency_ready` | a replacement pod reaches Ready |
+| `data_survives` | the replacement pod reads the probe file back — missing = data lost (content changed = different failure) |
+| `app_recovered` | the app answers its health probe again |
+| `settle` | steady state: app healthy, dependency up |
+
+The volume path comes from the slice (`dependencies[].volume.path`) — the
+slice is the fault model. No volume declared → exit 64 with "add
+`dependencies[].volume`". A *data lost* finding means the data was image-
+local or emptyDir, not on a PVC that follows the pod.
 
 ### More drills later
 
@@ -123,7 +148,6 @@ discovered:
 
 | Slice declares | Drill (planned) | Verifies |
 |---|---|---|
-| `dependencies[].volume` | `volume-survives` | data survives the restart |
 | `app.resources` limits | `resource-pressure` | throttle/OOMKill handling |
 
 ### Drill safety
@@ -168,6 +192,7 @@ contract](json.md)). The decision table:
 | `pass` / exit 0 | verified | report done, with the evidence |
 | `fail` / exit 1 | your change lost a check it actually ran | fix code, re-sync, re-run |
 | `error` / exit 3 | environment broken, checks didn't run | fix env/slice — never app code |
+| exit 64 | the drill can't run as requested (missing volume/HPA, bad flag) | fix the invocation or the slice |
 
 Then destroy: `down`, `--delete-after`, or the TTL — and never leave an
 environment without one.

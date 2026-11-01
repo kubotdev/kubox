@@ -19,6 +19,7 @@ Global flags (every command): `--kubeconfig`, `--context`, `--timeout`
 | `test drill N --dependency d` | Failure drill: restart a dependency, verify the app recovers |
 | `test drill N --all` | Drill every dependency in the environment |
 | `test drill N --type scale-under-load --script f.js` | Verify the HPA scales under load while the k6 SLO holds |
+| `test drill N --type volume-survives --dependency d` | Restart a volume-bearing dependency and verify its data survives |
 | `mcp` | MCP server on stdio (see [MCP](mcp.md)) |
 
 `test load` and `test drill` accept the one-shot set: `--create --slice
@@ -33,8 +34,9 @@ Global flags (every command): `--kubeconfig`, `--context`, `--timeout`
   `--report`) to append a diagnosis check.
 - `test drill`: `--dependency` or `--all`, `--type` (default
   `dependency-restart`; `scale-under-load` needs `--script` or `--slice`
-  with `tests/load.js`, plus `app.scaling`), `--timeout` (per-phase
-  budget, default 2 m), `--json`, `--kubot`.
+  with `tests/load.js`, plus `app.scaling`; `volume-survives` needs
+  `--dependency` plus `dependencies[].volume` in the slice), `--timeout`
+  (per-phase budget, default 2 m), `--json`, `--kubot`.
 
 ## Exit codes
 
@@ -46,7 +48,7 @@ A scriptable contract:
 | 1 | Operation failed — for `test`: a check **failed**, environment healthy |
 | 2 | Not authenticated / no kubeconfig |
 | 3 | Environment unhealthy — verification **checks not run** |
-| 64 | Bad usage |
+| 64 | Bad usage — flags, missing slice field, or a drill that can't run as requested (no volume/HPA) |
 
 For agents the 1-vs-3 split is the whole game: **1 means fix the app, 3
 means fix the environment** (image, quota, crashlooping dependency) and

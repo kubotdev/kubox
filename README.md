@@ -30,7 +30,7 @@
   <a href="#roadmap">Roadmap</a>
 </p>
 
-> **Status: early (v0.3).** Sharp edges expected; the CLI and MCP tool surface
+> **Status: early (v0.4).** Sharp edges expected; the CLI and MCP tool surface
 > may change. kubox does not build or push images — see
 > [Getting images into the environment](#getting-images-into-the-environment).
 
@@ -449,6 +449,20 @@ HPA is active — this fails with a metrics-server hint when it isn't),
 (the script's own thresholds are the assertion), `settle`. Scale-down is
 never asserted — the HPA's default stabilization window is five minutes.
 
+With `dependencies[].volume` in the slice, `volume-survives` checks the
+one thing "restart it and see if it comes back" never does — that the
+**data** came back too:
+
+```sh
+kubox test drill fix-auth --type volume-survives --dependency postgres --json
+```
+
+A probe file is written into the volume before the pods are deleted; the
+replacement pod must read it back unchanged (`inject` → `dependency_ready`
+→ `data_survives` → `app_recovered` → `settle`). Data lost means it was
+image-local or emptyDir, not a PVC that follows the pod. No volume
+declared → exit 64, never a bogus result.
+
 ## Use it with your agent
 
 kubox ships a skill that teaches coding agents the judgment layer — the
@@ -541,6 +555,7 @@ step. Details: [docs/ci.md](docs/ci.md).
 | `kubox test load N --script f.js` | Run a k6 load test (`--json` for machines, `--report` for the envelope, `--kubot` to fold in diagnosis) |
 | `kubox test drill N --dependency d` | Failure drill: restart a dependency, verify the app recovers (`--all`, `--json`) |
 | `kubox test drill N --type scale-under-load --script f.js` | Verify the HPA scales under k6 load while the SLO holds |
+| `kubox test drill N --type volume-survives --dependency d` | Restart a volume-bearing dependency and verify its data survives |
 | `kubox mcp` | Run as an MCP server |
 
 ## Roadmap
@@ -549,8 +564,13 @@ kubox stays a **lifecycle + guardrails + measurement** layer — it will not
 grow a build system, a registry, or a UI (`kubox build` is a docker +
 `kind load` convenience, nothing more). What's next, roughly:
 
-- **v0.4** — more drills derived from the slice (network policies), and
-  richer diagnosis folding
+- **v0.5** — more drills derived from the slice (network policies,
+  resource pressure), and richer diagnosis folding
+
+Already in (v0.4): the `volume-survives` drill, a versioned JSON Schema for
+the envelope (generated from the Go types, drift-guarded in CI), and kubox's
+own CI running through the composite action (`kubox-version: source`) — see
+[docs/testing.md](docs/testing.md) and [docs/json.md](docs/json.md).
 
 Already in (v0.3): the `scale-under-load` drill, kubot diagnosis in the
 envelope (`--kubot`), and the CI/PR GitHub Action — see

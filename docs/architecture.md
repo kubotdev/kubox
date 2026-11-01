@@ -36,7 +36,8 @@ Conventions: mutation only ever targets namespaces labeled
 `kubox.dev/env`; kubox owns lifecycle and evidence — `kubox build` is a
 `docker build` + `kind load` passthrough, never a registry or build
 service; tests use fake clients (never a live cluster), with injectable
-seams (`waitFn`, `probeFn`, `runCommand`, `loadFn`, `execFn`) where a real
+seams (`waitFn`, `probeFn`, `probeFileFn`, `runCommand`, `loadFn`, `execFn`)
+where a real
 cluster would otherwise be needed.
 
 CI (`action.yml` + `scripts/ci.sh`) is a thin composite wrapper — same
@@ -60,3 +61,7 @@ preflight (namespace, containers, deployments, scheduling, app endpoints)
 → run the check (k6 thresholds / drill phases) → one [envelope](json.md).
 The preflight is what makes `error` (environment broken, checks not run)
 distinguishable from `fail` (the app lost) — the property agents build on.
+The envelope's shape is pinned by a JSON Schema generated from the Go
+types (`internal/env/schema.go`, `go run ./tools/schemagen` →
+`schema/kubox-envelope-<v>.json`) — a drift-guard test fails CI when the
+committed schema and the types diverge.

@@ -79,6 +79,10 @@ for the after-comparison.
 - Dependency first: `kubox test drill <env> --dependency postgres --json` — the
   standardized drill: deletes the dep's pods, times recovery on both sides, and
   returns a diagnosis (dep slow to restart vs app missing reconnect logic).
+- Data on a volume: `kubox test drill <env> --type volume-survives
+  --dependency <svc> --json` — a probe file written before the restart must
+  come back unchanged; "data lost" means image-local/emptyDir, not a PVC
+  (slice needs `dependencies[].volume`).
 - App: `kubox exec <env> -- kubectl delete pod -l app=<svc>` — watch recreation + probe.
 - Then probe health + a quick load loop — reconnect bugs (SYN_SENT, pool exhaustion) surface here.
 

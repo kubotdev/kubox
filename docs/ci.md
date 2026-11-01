@@ -25,9 +25,12 @@ jobs:
 | `name` | `ci` | Environment name (namespace suffix) |
 | `cluster` | `kind` | `kind` creates a throwaway cluster; `existing` uses the current kubeconfig context |
 | `build` | `true` | `docker build` + `kind load` before `up` (skipped automatically when the slice has no `app.build`) |
-| `drill` | `none` | `dependency-restart:<service>` or `scale-under-load` (kind gets metrics-server installed automatically) |
+| `drill` | `none` | `dependency-restart:<service>`, `volume-survives:<service>`, or `scale-under-load` (kind gets metrics-server installed automatically) |
 | `ttl` | `30m` | Environment TTL |
-| `kubox-version` | `latest` | kubox release tag to install |
+| `kubox-version` | `latest` | kubox release tag to install. `source` builds kubox from this checkout instead (`uses: ./` — dogfood unreleased changes; needs Go on the runner) |
+
+kubox's own CI runs this action against [demo/shop](../demo/shop) with
+`kubox-version: source` — the action under test is the action being merged.
 
 ## Outputs
 
