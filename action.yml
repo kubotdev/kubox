@@ -26,7 +26,7 @@ inputs:
     required: false
     default: 'true'
   drill:
-    description: 'Drill after the load test: none (default), dependency-restart:<service>, or scale-under-load (needs app.scaling; metrics-server is installed into kind clusters automatically).'
+    description: 'Drill after the load test: none (default), dependency-restart:<service>, volume-survives:<service>, or scale-under-load (needs app.scaling; metrics-server is installed into kind clusters automatically).'
     required: false
     default: 'none'
   ttl:
@@ -34,7 +34,7 @@ inputs:
     required: false
     default: '30m'
   kubox-version:
-    description: 'kubox release tag to install, e.g. v0.3.0 (latest by default).'
+    description: 'kubox release tag to install, e.g. v0.3.0 (latest by default). Use source to build kubox from this checkout instead (dogfooding unreleased changes; needs Go).'
     required: false
     default: 'latest'
 

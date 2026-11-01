@@ -94,7 +94,6 @@ if [ -z "$SCRIPT" ]; then
   fi
 fi
 
-echo "--- install kubox ($KUBOX_VERSION)"
 case "$CLUSTER" in
   kind | existing) ;;
   *)
@@ -102,7 +101,16 @@ case "$CLUSTER" in
     emit error 64
     ;;
 esac
-sh "$ACTION_PATH/install.sh"
+
+if [ "$KUBOX_VERSION" = "source" ]; then
+  echo "--- build kubox from source ($ACTION_PATH)"
+  mkdir -p "$KUBOX_INSTALL_DIR"
+  (cd "$ACTION_PATH" && go build -o "$KUBOX_INSTALL_DIR/kubox" ./cmd/kubox)
+  "$KUBOX_INSTALL_DIR/kubox" --version
+else
+  echo "--- install kubox ($KUBOX_VERSION)"
+  sh "$ACTION_PATH/install.sh"
+fi
 
 if [ "$CLUSTER" = "kind" ]; then
   KIND_CREATED="${KIND_NAME:-kubox-ci}"
@@ -154,12 +162,16 @@ if [ "$DRILL" != "none" ]; then
       kubox test drill "$ENV_NAME" --type dependency-restart \
         --dependency "${DRILL#dependency-restart:}" --json | tee "$DRILL_OUT" || drill_rc=$?
       ;;
+    volume-survives:*)
+      kubox test drill "$ENV_NAME" --type volume-survives \
+        --dependency "${DRILL#volume-survives:}" --json | tee "$DRILL_OUT" || drill_rc=$?
+      ;;
     scale-under-load)
       kubox test drill "$ENV_NAME" --type scale-under-load --script "$SCRIPT" \
         --slice "$SLICE" --timeout 3m --json | tee "$DRILL_OUT" || drill_rc=$?
       ;;
     *)
-      echo "::error::unknown drill '$DRILL' — use none, dependency-restart:<service>, or scale-under-load"
+      echo "::error::unknown drill '$DRILL' — use none, dependency-restart:<service>, volume-survives:<service>, or scale-under-load"
       emit error 64
       ;;
   esac

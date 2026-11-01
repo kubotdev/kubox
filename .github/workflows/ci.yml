@@ -22,3 +22,16 @@ jobs:
         run: go test ./internal/mcp/...
       - name: test slice
         run: go test ./internal/slice/...
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: ./
+        with:
+          slice: demo/shop
+          drill: dependency-restart:postgres
+          kubox-version: source
