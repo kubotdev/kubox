@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kubotdev/kubox/internal/env/report",
+  "$ref": "#/$defs/Report",
+  "$defs": {
+    "Check": {
+      "properties": {
+        "type": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "findings": {
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "type": "array"
+        },
+        "detail": true
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "type",
+        "status"
+      ]
+    },
+    "EnvHealth": {
+      "properties": {
+        "healthy": {
+          "type": "boolean"
+        },
+        "namespace": {
+          "type": "string"
+        },
+        "problems": {
+          "items": {
+            "$ref": "#/$defs/EnvProblem"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "healthy",
+        "namespace"
+      ]
+    },
+    "EnvProblem": {
+      "properties": {
+        "component": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "kind"
+      ]
+    },
+    "Finding": {
+      "properties": {
+        "metric": {
+          "type": "string"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "actual": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "Report": {
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvHealth"
+        },
+        "checks": {
+          "items": {
+            "$ref": "#/$defs/Check"
+          },
+          "type": "array"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "required": [
+        "status",
+        "environment",
+        "checks"
+      ]
+    }
+  }
+}
