@@ -3,6 +3,9 @@ package env
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -441,5 +444,163 @@ func TestRunDrillScaleUnderLoadNoScaleUp(t *testing.T) {
 	f := res.Check.Findings[0]
 	if f.Metric != "replicas" || !strings.Contains(f.Message, "replicas") {
 		t.Errorf("finding = %+v, want scale-up diagnosis", f)
+	}
+}
+
+// volume-survives
+
+// volumeSliceFixture writes a slice with (or without) a postgres volume and
+// returns its directory for the namespace's slice-dir annotation.
+func volumeSliceFixture(t *testing.T, withVolume bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	vol := ""
+	if withVolume {
+		vol = "    volume:\n      size: 1Gi\n      path: /var/lib/postgresql/data\n"
+	}
+	yaml := "name: shop\n" +
+		"app:\n  image: shop:v1\n  port: 8080\n" +
+		"dependencies:\n" +
+		"  - name: postgres\n    image: postgres:16-alpine\n    port: 5432\n" + vol
+	if err := os.WriteFile(filepath.Join(dir, "kubox.yaml"), []byte(yaml), 0o644); err != nil {
+		t.Fatalf("write slice fixture: %v", err)
+	}
+	return dir
+}
+
+// volumeDrillObjects is drillEnvObjects with the slice-dir annotation set.
+func volumeDrillObjects(t *testing.T, envName, sliceDir string) []runtime.Object {
+	t.Helper()
+	objs := drillEnvObjects(envName)
+	ns := testNamespace(envName)
+	ns.Annotations = map[string]string{AnnotationSliceDir: sliceDir}
+	objs[0] = ns
+	return objs
+}
+
+func TestRunDrillVolumeSurvivesRequiresDependency(t *testing.T) {
+	m := NewManager(fake.NewSimpleClientset(drillEnvObjects("shop")...), nil, "")
+	_, err := m.RunDrill(context.Background(), "shop", DrillSpec{Type: DrillVolumeSurvives})
+	if err == nil || !strings.Contains(err.Error(), "--dependency") {
+		t.Errorf("err = %v, want --dependency hint", err)
+	}
+}
+
+func TestRunDrillVolumeSurvivesNoVolumeDeclared(t *testing.T) {
+	dir := volumeSliceFixture(t, false)
+	m := NewManager(fake.NewSimpleClientset(volumeDrillObjects(t, "shop", dir)...), nil, "")
+	_, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillVolumeSurvives, Dependency: "postgres",
+	})
+	if err == nil || !strings.Contains(err.Error(), "declares no volume") {
+		t.Errorf("err = %v, want 'declares no volume'", err)
+	}
+}
+
+func TestRunDrillVolumeSurvives(t *testing.T) {
+	dir := volumeSliceFixture(t, true)
+	cs := fake.NewSimpleClientset(volumeDrillObjects(t, "shop", dir)...)
+	deleteAndRecreateReactor(cs, "shop", "postgres", "postgres-2", "uid-new")
+	m := NewManager(cs, nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+
+	var stored string
+	m.probeFileFn = func(_ context.Context, _, _, _, _, value string) (string, error) {
+		if value != "" {
+			stored = value
+			return "", nil
+		}
+		if stored == "" {
+			return "", errors.New("cat: no such file")
+		}
+		return stored + "\n", nil
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillVolumeSurvives, Dependency: "postgres", Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckPass {
+		t.Errorf("status = %s, want pass (findings: %+v)", res.Check.Status, res.Check.Findings)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if d.Target != "postgres" || d.Fault != "delete-pods" {
+		t.Errorf("detail = %+v, want target postgres / delete-pods", d)
+	}
+	for _, name := range []string{"inject", "dependency_ready", "data_survives", "app_recovered", "settle"} {
+		if ph := phaseByName(t, d.Phases, name); ph.Status != "pass" {
+			t.Errorf("phase %s = %s (%s), want pass", name, ph.Status, ph.Message)
+		}
+	}
+	if len(res.Check.Findings) != 1 || res.Check.Findings[0].Metric != "volume_data" {
+		t.Errorf("findings = %+v, want one volume_data finding", res.Check.Findings)
+	}
+	if msg := res.Check.Findings[0].Message; !strings.Contains(msg, "kept its data") {
+		t.Errorf("message = %q, want data-survival confirmation", msg)
+	}
+}
+
+func TestRunDrillVolumeSurvivesDataLost(t *testing.T) {
+	dir := volumeSliceFixture(t, true)
+	cs := fake.NewSimpleClientset(volumeDrillObjects(t, "shop", dir)...)
+	deleteAndRecreateReactor(cs, "shop", "postgres", "postgres-2", "uid-new")
+	m := NewManager(cs, nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+	m.probeFileFn = func(_ context.Context, _, _, _, _, value string) (string, error) {
+		if value != "" {
+			return "", nil // write succeeds — the volume is simply gone after
+		}
+		return "", errors.New("cat: /var/lib/postgresql/data/.kubox-probe: No such file or directory")
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillVolumeSurvives, Dependency: "postgres", Timeout: 500 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckFail {
+		t.Errorf("status = %s, want fail (findings: %+v)", res.Check.Status, res.Check.Findings)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if ph := phaseByName(t, d.Phases, "data_survives"); ph.Status != "timeout" {
+		t.Errorf("phase data_survives = %s (%s), want timeout", ph.Status, ph.Message)
+	}
+	f := res.Check.Findings[0]
+	if f.Metric != "volume_data" || !strings.Contains(f.Message, "data did not survive") {
+		t.Errorf("finding = %+v, want volume_data with data-loss diagnosis", f)
+	}
+}
+
+func TestRunDrillVolumeSurvivesDataChanged(t *testing.T) {
+	dir := volumeSliceFixture(t, true)
+	cs := fake.NewSimpleClientset(volumeDrillObjects(t, "shop", dir)...)
+	deleteAndRecreateReactor(cs, "shop", "postgres", "postgres-2", "uid-new")
+	m := NewManager(cs, nil, "")
+	m.probeFn = func(context.Context, string, string, int32, string) error { return nil }
+	m.probeFileFn = func(_ context.Context, _, _, _, _, value string) (string, error) {
+		if value != "" {
+			return "", nil
+		}
+		return "tampered-content\n", nil // different file on the same volume
+	}
+
+	res, err := m.RunDrill(context.Background(), "shop", DrillSpec{
+		Type: DrillVolumeSurvives, Dependency: "postgres", Timeout: 2 * time.Second,
+	})
+	if err != nil {
+		t.Fatalf("RunDrill: %v", err)
+	}
+	if res.Check.Status != CheckFail {
+		t.Errorf("status = %s, want fail (findings: %+v)", res.Check.Status, res.Check.Findings)
+	}
+	d := decodeDrillDetail(t, res.Check)
+	if ph := phaseByName(t, d.Phases, "data_survives"); ph.Status != "failed" {
+		t.Errorf("phase data_survives = %s (%s), want failed", ph.Status, ph.Message)
+	}
+	if f := res.Check.Findings[0]; f.Metric != "volume_data" {
+		t.Errorf("finding = %+v, want volume_data", f)
 	}
 }

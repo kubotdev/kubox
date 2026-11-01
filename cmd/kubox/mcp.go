@@ -189,7 +189,9 @@ func kuboxTools() []mcp.Tool {
 		{
 			Name: "test_drill",
 			Description: "Run a failure drill against an environment: restart a " +
-				"dependency and verify the app recovers, or hold the app under " +
+				"dependency and verify the app recovers, restart a " +
+				"volume-bearing dependency and verify its data survives " +
+				"(type 'volume-survives'), or hold the app under " +
 				"k6 load and verify the HPA scales it up (type " +
 				"'scale-under-load', needs app.scaling + metrics-server + a " +
 				"script). Preflights the environment first: if it is unhealthy " +
@@ -208,7 +210,7 @@ func kuboxTools() []mcp.Tool {
 					},
 					"type": map[string]any{
 						"type":        "string",
-						"description": "Drill type: 'dependency-restart' (default) or 'scale-under-load'.",
+						"description": "Drill type: 'dependency-restart' (default), 'scale-under-load', or 'volume-survives'.",
 					},
 					"dependency": map[string]any{
 						"type":        "string",
@@ -403,6 +405,13 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		if !args.All && args.Dependency == "" {
 			return "", fmt.Errorf("either 'dependency' or 'all' is required")
 		}
+	case env.DrillVolumeSurvives:
+		if args.All {
+			return "", fmt.Errorf("volume-survives does not take 'all' — name the volume-bearing service in 'dependency'")
+		}
+		if args.Dependency == "" {
+			return "", fmt.Errorf("volume-survives requires 'dependency'")
+		}
 	case env.DrillScaleLoad:
 		if args.Script == "" {
 			return "", fmt.Errorf("scale-under-load requires 'script'")
@@ -412,8 +421,8 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		}
 		resolvedScript = env.ResolveScriptPath("", args.Script)
 	default:
-		return "", fmt.Errorf("unknown drill type %q (supported: %s, %s)",
-			drillType, env.DrillDependencyRestart, env.DrillScaleLoad)
+		return "", fmt.Errorf("unknown drill type %q (supported: %s, %s, %s)",
+			drillType, env.DrillDependencyRestart, env.DrillScaleLoad, env.DrillVolumeSurvives)
 	}
 	var timeoutDur time.Duration
 	if args.Timeout != "" {
@@ -429,7 +438,7 @@ func testDrillTool(ctx context.Context, raw json.RawMessage) (string, error) {
 		return "", err
 	}
 	targets := []string{""} // scale-under-load runs once, no dependency
-	if drillType == env.DrillDependencyRestart {
+	if drillType == env.DrillDependencyRestart || drillType == env.DrillVolumeSurvives {
 		targets = []string{args.Dependency}
 		if args.All {
 			e, err := m.Get(ctx, args.Name)

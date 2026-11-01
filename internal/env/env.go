@@ -51,6 +51,9 @@ type Manager struct {
 	loadFn func(ctx context.Context, envName, scriptPath string) (*K6Result, error)
 	// execFn runs a command in the environment's toolbox.
 	execFn func(ctx context.Context, envName string, command []string) (*ExecResult, error)
+	// probeFileFn writes (value != "") or reads a probe file inside a pod's
+	// container filesystem; overridable in tests (volume-survives drill).
+	probeFileFn func(ctx context.Context, ns, pod, container, path, value string) (string, error)
 }
 
 func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) *Manager {
@@ -62,6 +65,7 @@ func NewManager(cs kubernetes.Interface, cfg *rest.Config, toolboxImage string) 
 	m.probeFn = m.defaultProbe
 	m.loadFn = m.RunLoadTest
 	m.execFn = m.ExecToolbox
+	m.probeFileFn = m.probeFileInPod
 	return m
 }
 

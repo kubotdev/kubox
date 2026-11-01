@@ -26,6 +26,7 @@ const (
 	CheckTypeLoad            = "load"
 	CheckTypeDrillDepRestart = "drill:dependency-restart"
 	CheckTypeDrillScaleLoad  = "drill:scale-under-load"
+	CheckTypeDrillVolume     = "drill:volume-survives"
 	CheckTypeDiagnosis       = "diagnosis"
 )
 

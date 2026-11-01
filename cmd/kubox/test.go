@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -262,6 +263,11 @@ func newTestDrillCmd() *cobra.Command {
 			"                      app.scaling in the slice and metrics-server in the\n" +
 			"                      cluster. Scale-down is not asserted (HPA stabilization\n" +
 			"                      defaults to 5 minutes).\n\n" +
+			"  volume-survives     Restart a volume-bearing dependency (--dependency)\n" +
+			"                      and verify the data on its declared volume\n" +
+			"                      (dependencies[].volume) survives: a probe file written\n" +
+			"                      before the restart must be re-readable, unchanged,\n" +
+			"                      from the replacement pod.\n\n" +
 			"The environment is preflighted first: if it is unhealthy, no fault is\n" +
 			"injected and the report says \"error\" (exit 3) — never \"fail\".\n\n" +
 			"With --kubot, `kubot inspect --json` runs in the toolbox afterwards and a\n" +
@@ -289,6 +295,13 @@ func newTestDrillCmd() *cobra.Command {
 				if !all && dependency == "" {
 					return usageErrf("test drill requires --dependency <name> or --all")
 				}
+			case env.DrillVolumeSurvives:
+				if all {
+					return usageErrf("volume-survives does not take --all — target the volume-bearing service with --dependency")
+				}
+				if dependency == "" {
+					return usageErrf("volume-survives requires --dependency <name>")
+				}
 			case env.DrillScaleLoad:
 				if all || dependency != "" {
 					return usageErrf("scale-under-load does not take --dependency/--all")
@@ -299,8 +312,8 @@ func newTestDrillCmd() *cobra.Command {
 					return serr
 				}
 			default:
-				return usageErrf("unknown drill type %q (supported: %s, %s)",
-					drillType, env.DrillDependencyRestart, env.DrillScaleLoad)
+				return usageErrf("unknown drill type %q (supported: %s, %s, %s)",
+					drillType, env.DrillDependencyRestart, env.DrillScaleLoad, env.DrillVolumeSurvives)
 			}
 
 			ttlDur, err := slice.ParseTTL(ttl)
@@ -342,7 +355,7 @@ func newTestDrillCmd() *cobra.Command {
 			}
 
 			targets := []string{""} // scale-under-load runs once, no dependency
-			if drillType == env.DrillDependencyRestart {
+			if drillType == env.DrillDependencyRestart || drillType == env.DrillVolumeSurvives {
 				targets = []string{dependency}
 				if all {
 					targets, err = drillTargets(ctx, m, envName)
@@ -365,6 +378,10 @@ func newTestDrillCmd() *cobra.Command {
 					Timeout:    timeoutDur,
 				})
 				if err != nil {
+					var se *env.DrillSetupError
+					if errors.As(err, &se) {
+						return usageErrf("%v", se)
+					}
 					return err
 				}
 				health = res.Environment
@@ -389,7 +406,7 @@ func newTestDrillCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&envName, "env", "", "environment name (or pass as positional arg)")
-	cmd.Flags().StringVar(&drillType, "type", env.DrillDependencyRestart, "drill type: dependency-restart | scale-under-load")
+	cmd.Flags().StringVar(&drillType, "type", env.DrillDependencyRestart, "drill type: dependency-restart | scale-under-load | volume-survives")
 	cmd.Flags().StringVar(&dependency, "dependency", "", "dependency to target (a service of the environment)")
 	cmd.Flags().StringVar(&script, "script", "", "k6 script driving scale-under-load (with --slice, defaults to its tests/load.js)")
 	cmd.Flags().BoolVar(&all, "all", false, "run the drill against every dependency in the environment")

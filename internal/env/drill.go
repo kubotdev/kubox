@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 const (
 	DrillDependencyRestart = "dependency-restart"
 	DrillScaleLoad         = "scale-under-load"
+	DrillVolumeSurvives    = "volume-survives"
 	defaultDrillTimeout    = 2 * time.Minute
 	drillPollInterval      = 2 * time.Second
 )
@@ -55,13 +57,21 @@ type DrillResult struct {
 	Environment EnvHealth
 }
 
+type DrillSetupError struct{ Msg string }
+
+func (e *DrillSetupError) Error() string { return e.Msg }
+
+func setupErrf(format string, a ...any) error {
+	return &DrillSetupError{Msg: fmt.Sprintf(format, a...)}
+}
+
 func (m *Manager) RunDrill(ctx context.Context, envName string, spec DrillSpec) (*DrillResult, error) {
 	spec.normalize()
 	switch spec.Type {
-	case DrillDependencyRestart, DrillScaleLoad:
+	case DrillDependencyRestart, DrillScaleLoad, DrillVolumeSurvives:
 	default:
-		return nil, fmt.Errorf("unknown drill type %q (supported: %s, %s)",
-			spec.Type, DrillDependencyRestart, DrillScaleLoad)
+		return nil, fmt.Errorf("unknown drill type %q (supported: %s, %s, %s)",
+			spec.Type, DrillDependencyRestart, DrillScaleLoad, DrillVolumeSurvives)
 	}
 
 	health, err := m.CheckEnv(ctx, envName)
@@ -75,20 +85,20 @@ func (m *Manager) RunDrill(ctx context.Context, envName string, spec DrillSpec) 
 	ns := slice.EnvNamespace(envName)
 	var check Check
 	switch spec.Type {
-	case DrillDependencyRestart:
-		if spec.Dependency == "" {
-			return nil, fmt.Errorf("%s requires a target dependency (--dependency)", spec.Type)
+	case DrillDependencyRestart, DrillVolumeSurvives:
+		if err := m.requireDependencyTarget(ctx, envName, ns, spec); err != nil {
+			return nil, err
 		}
-		if spec.Dependency == envName {
-			return nil, fmt.Errorf(
-				"target %q is the app itself — restart it with `kubox exec %s -- kubectl delete pod -l app=%s`",
-				spec.Dependency, envName, envName)
+		if spec.Type == DrillDependencyRestart {
+			check, err = m.runDependencyRestart(ctx, envName, ns, spec)
+		} else {
+			var volPath string
+			volPath, err = m.dependencyVolumePath(ctx, ns, spec.Dependency)
+			if err != nil {
+				return nil, err
+			}
+			check, err = m.runVolumeSurvives(ctx, envName, ns, spec, volPath)
 		}
-		svc, err := m.Client.CoreV1().Services(ns).Get(ctx, spec.Dependency, metav1.GetOptions{})
-		if err != nil || svc.Labels[LabelEnv] != envName {
-			return nil, fmt.Errorf("dependency %q is not a service of environment %q", spec.Dependency, envName)
-		}
-		check, err = m.runDependencyRestart(ctx, envName, ns, spec)
 		if err != nil {
 			return nil, err
 		}
@@ -102,6 +112,22 @@ func (m *Manager) RunDrill(ctx context.Context, envName string, spec DrillSpec) 
 		}
 	}
 	return &DrillResult{Check: check, Environment: *health}, nil
+}
+
+func (m *Manager) requireDependencyTarget(ctx context.Context, envName, ns string, spec DrillSpec) error {
+	if spec.Dependency == "" {
+		return fmt.Errorf("%s requires a target dependency (--dependency)", spec.Type)
+	}
+	if spec.Dependency == envName {
+		return setupErrf(
+			"target %q is the app itself — restart it with `kubox exec %s -- kubectl delete pod -l app=%s`",
+			spec.Dependency, envName, envName)
+	}
+	svc, err := m.Client.CoreV1().Services(ns).Get(ctx, spec.Dependency, metav1.GetOptions{})
+	if err != nil || svc.Labels[LabelEnv] != envName {
+		return setupErrf("dependency %q is not a service of environment %q", spec.Dependency, envName)
+	}
+	return nil
 }
 
 type phaseRecorder struct {
@@ -229,6 +255,14 @@ func failFinding(phases []DrillPhase, target string, timeout time.Duration) Find
 				Message: fmt.Sprintf("%s did not become ready within %s — the dependency itself failed to recover",
 					target, timeout),
 			}
+		case "data_survives":
+			return Finding{
+				Metric:   "volume_data",
+				Expected: "probe file survives the pod restart",
+				Actual:   ph.Message,
+				Message: fmt.Sprintf("data did not survive: %s — was a PVC actually mounted? (emptyDir or image-local data dies with the pod)",
+					ph.Message),
+			}
 		case "app_recovered":
 			depReady := phaseDuration(phases, "dependency_ready")
 			return Finding{
@@ -275,13 +309,177 @@ func phaseMessage(phases []DrillPhase, name string) string {
 	return ""
 }
 
+// volume-survives
+
+func (m *Manager) runVolumeSurvives(ctx context.Context, envName, ns string, spec DrillSpec, volPath string) (Check, error) {
+	target := spec.Dependency
+	start := time.Now()
+
+	appPort, err := m.appPort(ctx, ns, envName)
+	if err != nil {
+		return Check{}, err
+	}
+	healthPath := m.appHealthPath(ctx, ns)
+
+	snapshot, err := m.podUIDs(ctx, ns, target)
+	if err != nil {
+		return Check{}, err
+	}
+	nonce := fmt.Sprintf("kubox-%d", time.Now().UnixNano())
+
+	detail := DrillDetail{Target: target, Fault: "delete-pods"}
+	rec := newPhaseRecorder()
+
+	rec.record(ctx, "inject", func() (string, error) {
+		pod, err := m.readyPodFor(ctx, ns, target, nil)
+		if err != nil {
+			return "", fmt.Errorf("no pod to probe: %w", err)
+		}
+		podName, container := probeTarget(pod)
+		if _, err := m.probeFileFn(ctx, ns, podName, container, volPath, nonce); err != nil {
+			return "", fmt.Errorf("write probe file: %w", err)
+		}
+		return m.injectDepRestart(ctx, ns, target)
+	})
+	rec.record(ctx, "dependency_ready", func() (string, error) {
+		return m.waitDepReady(ctx, ns, target, snapshot, spec.Timeout)
+	})
+	rec.record(ctx, "data_survives", func() (string, error) {
+		return m.waitProbeMatches(ctx, ns, target, volPath, nonce, snapshot, spec.Timeout)
+	})
+	rec.record(ctx, "app_recovered", func() (string, error) {
+		return m.waitAppHealthy(ctx, envName, ns, appPort, healthPath, spec.Timeout)
+	})
+	rec.record(ctx, "settle", func() (string, error) {
+		return m.settle(ctx, envName, ns, target, appPort, healthPath, spec.Timeout)
+	})
+
+	return buildDrillCheck(CheckTypeDrillVolume, detail, rec, start,
+		func(phases []DrillPhase) Finding { return volumePassFinding(target, volPath) },
+		func(phases []DrillPhase) Finding { return failFinding(phases, target, spec.Timeout) }), nil
+}
+
+func (m *Manager) dependencyVolumePath(ctx context.Context, ns, dep string) (string, error) {
+	n, err := m.Client.CoreV1().Namespaces().Get(ctx, ns, metav1.GetOptions{})
+	if err != nil {
+		return "", err
+	}
+	dir := n.Annotations[AnnotationSliceDir]
+	if dir == "" {
+		return "", setupErrf("namespace %s records no slice directory — volume-survives reads dependencies[].volume from kubox.yaml", ns)
+	}
+	s, _, err := slice.Load(dir)
+	if err != nil {
+		return "", setupErrf("load slice %s: %v", dir, err)
+	}
+	for _, d := range s.Dependencies {
+		if d.Name != dep {
+			continue
+		}
+		if d.Volume == nil {
+			return "", setupErrf("service %q declares no volume — add dependencies[].volume (size + path) to kubox.yaml and run `kubox up` again", dep)
+		}
+		return d.Volume.Path, nil
+	}
+	return "", setupErrf("service %q is not a dependency of slice %s", dep, dir)
+}
+
+func (m *Manager) readyPodFor(ctx context.Context, ns, target string, skip map[string]bool) (*corev1.Pod, error) {
+	pods, err := m.Client.CoreV1().Pods(ns).List(ctx, metav1.ListOptions{
+		LabelSelector: "app=" + target,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for i := range pods.Items {
+		p := &pods.Items[i]
+		if skip[string(p.UID)] || p.DeletionTimestamp != nil {
+			continue
+		}
+		if podReady(p) {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("no ready pod for %q", target)
+}
+
+func probeTarget(p *corev1.Pod) (name, container string) {
+	if len(p.Spec.Containers) > 0 {
+		container = p.Spec.Containers[0].Name
+	}
+	return p.Name, container
+}
+
+func (m *Manager) probeFileInPod(ctx context.Context, ns, pod, container, path, value string) (string, error) {
+	probe := filepath.Join(path, ".kubox-probe")
+	var cmd []string
+	op := "read"
+	if value != "" {
+		op = "write"
+		cmd = []string{"sh", "-c", fmt.Sprintf("printf '%%s' '%s' > '%s'", value, probe)}
+	} else {
+		cmd = []string{"sh", "-c", fmt.Sprintf("cat '%s'", probe)}
+	}
+	res, err := m.execInPod(ctx, ns, pod, container, cmd)
+	if err != nil {
+		return "", err
+	}
+	if res.ExitCode != 0 {
+		return "", fmt.Errorf("probe file %s failed (exit %d): %s", op, res.ExitCode, strings.TrimSpace(res.Stderr))
+	}
+	return res.Stdout, nil
+}
+
+func (m *Manager) waitProbeMatches(ctx context.Context, ns, target, volPath, nonce string, skip map[string]bool, timeout time.Duration) (string, error) {
+	pctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var lastErr error
+	for {
+		pod, err := m.readyPodFor(pctx, ns, target, skip)
+		if err == nil {
+			podName, container := probeTarget(pod)
+			got, err := m.probeFileFn(pctx, ns, podName, container, volPath, "")
+			switch {
+			case err != nil:
+				lastErr = err
+			case strings.TrimSpace(got) == nonce:
+				return fmt.Sprintf("probe file identical on replacement pod %s", podName), nil
+			default:
+				return fmt.Sprintf("probe file read back as %q after restart", strings.TrimSpace(got)),
+					fmt.Errorf("probe file content changed across the restart")
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-pctx.Done():
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			return fmt.Sprintf("probe file not re-readable within %s (%v)", timeout, lastErr),
+				context.DeadlineExceeded
+		case <-time.After(drillPollInterval):
+		}
+	}
+}
+
+func volumePassFinding(target, volPath string) Finding {
+	return Finding{
+		Metric:   "volume_data",
+		Expected: "probe file survives the pod restart",
+		Actual:   "identical after restart",
+		Message: fmt.Sprintf("%s kept its data: probe file at %s identical after the pod was replaced",
+			target, volPath),
+	}
+}
+
 // scale-under-load
 
 func (m *Manager) runScaleUnderLoad(ctx context.Context, envName, ns string, spec DrillSpec) (Check, error) {
 	start := time.Now()
 	hpa, err := m.Client.AutoscalingV2().HorizontalPodAutoscalers(ns).Get(ctx, envName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return Check{}, fmt.Errorf("environment %q has no HPA — add app.scaling to kubox.yaml and run `kubox up` again", envName)
+		return Check{}, setupErrf("environment %q has no HPA — add app.scaling to kubox.yaml and run `kubox up` again", envName)
 	}
 	if err != nil {
 		return Check{}, err
@@ -295,7 +493,7 @@ func (m *Manager) runScaleUnderLoad(ctx context.Context, envName, ns string, spe
 		baseline = *dep.Spec.Replicas
 	}
 	if baseline >= hpa.Spec.MaxReplicas {
-		return Check{}, fmt.Errorf("app already at scaling.max (%d) — no headroom to scale up; raise app.scaling.max", hpa.Spec.MaxReplicas)
+		return Check{}, setupErrf("app already at scaling.max (%d) — no headroom to scale up; raise app.scaling.max", hpa.Spec.MaxReplicas)
 	}
 
 	appPort, err := m.appPort(ctx, ns, envName)
